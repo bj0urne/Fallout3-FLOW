@@ -1,4 +1,4 @@
-# Builds STRIDE.dll (32-bit) with llvm-mingw and installs it into Data\FOSE\Plugins.
+﻿# Builds STRIDE.dll (32-bit) with llvm-mingw and installs it into Data\FOSE\Plugins.
 #   .\build.ps1            build + install (keeps an existing STRIDE.ini)
 #   .\build.ps1 -NoInstall build only
 param([switch]$NoInstall)
@@ -18,7 +18,7 @@ New-Item -ItemType Directory -Force $out | Out-Null
 $dll = Join-Path $out 'STRIDE.dll'
 
 & $cxx -std=c++17 -O2 -msse2 -mfpmath=sse -Wall -Wextra -shared -static -s `
-    -o $dll (Join-Path $root 'src\main.cpp')
+    -o $dll (Join-Path $root 'src\main.cpp') -ld3d9
 if ($LASTEXITCODE -ne 0) { throw "compile failed ($LASTEXITCODE)" }
 Write-Host "built $dll"
 

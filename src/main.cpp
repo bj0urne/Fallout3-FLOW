@@ -25,6 +25,7 @@
 // All patch sites are verified byte-for-byte before anything is written.
 
 #include <windows.h>
+#include <d3d9.h>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -85,6 +86,16 @@ namespace addr {
 	constexpr uintptr_t kSettingShoulderX   = 0x00F5EAFC;  // fOverShoulderPosX (40)
 	constexpr uintptr_t kSettingAimPointX   = 0x00F5EB44;  // fOverShoulderOffsetPointX (98.4)
 	constexpr uintptr_t kSetMovementFlags   = 0x007E8F70;
+	// Crosshair. Actor::GetWeaponStat(type) (0x701C60, thiscall, ret 4): type 2 = gun spread
+	// multiplier (condition, skill, crippled limbs, iron sights, crouch/walk/run, then the
+	// "Calculate Gun Spread" perk entry). The cone is (weapon.spread * mult + weapon.minSpread)
+	// degrees, as at 0x4BE71D. Weapon = process vfunc +0x148 -> entry, entry+8 -> TESObjectWEAP.
+	constexpr uintptr_t kGetWeaponStat      = 0x00701C60;
+	constexpr uintptr_t kIsMenuMode         = 0x00619160;  // bool __cdecl ()
+	constexpr uintptr_t kHUDMainMenu        = 0x010762B4;  // HUDMainMenu*; +0x190 element mask, 0x40 = crosshair
+	constexpr uintptr_t kSettingCrosshair   = 0x01075AE8;  // bCrossHair:GamePlay (value byte at +4)
+	constexpr uintptr_t kSettingHUDColor    = 0x01075B74;  // uHUDColor:Interface (RGBA, R in the high byte)
+	constexpr uintptr_t kCameraRoot         = 0x0107A224;  // scene camera root; +0xAC = NiCamera
 	constexpr uintptr_t kSlotSetMovementFlags = 0x0C;
 	// Game state checks, taken from the script condition functions IsWeaponOut (0x510E50 ->
 	// Actor::IsWeaponOut 0x6F6C70), GetSitting (0x50F9D0) and GetKnockedState (0x510EC0).
@@ -216,6 +227,20 @@ struct CameraConfig {               // times in seconds
 	bool  vanityFix     = true;     // vanity camera orbits keep the player on the same screen side
 };
 
+struct CrosshairConfig {
+	bool  enabled       = true;
+	float scale         = 1.0f;     // gap = spread cone * scale (calibration)
+	float minGap        = 3.0f;     // pixels at 1080p
+	float lineLength    = 9.0f;     // pixels at 1080p
+	float thickness     = 2.0f;     // pixels at 1080p
+	float smoothTime    = 0.06f;    // seconds
+	bool  hudColor      = true;     // use the game's HUD colour
+	int   r = 26, gr = 255, b = 128;
+	float opacity       = 0.9f;
+	bool  outline       = true;
+	bool  hideScoped    = true;
+};
+
 static struct Config {
 	bool  enabled        = true;
 	float upperBodyTurn  = 0.0f;    // 0 = upper body keeps facing forward, 1 = turns with the legs
@@ -232,6 +257,7 @@ static struct Config {
 	FreeLookConfig look;
 	MoveConfig move;
 	CameraConfig cam;
+	CrosshairConfig xh;
 	char  bodyNode[64]   = "Scene Root";  // whole body turn; Scene Root = the actor's 3D root
 	bool  footIKOff      = false;   // pause the game's foot IK while the body/legs are turned
 	char  legsNode[64]   = "Bip01 Pelvis";
@@ -321,6 +347,31 @@ static void LoadConfig()
 	m.accel         = b("Moving", "bAcceleration", m.accel);
 	m.accelTime     = IniFloat(path, "Moving", "fAccelerationMs", m.accelTime * 1000.0f) / 1000.0f;
 	m.decelTime     = IniFloat(path, "Moving", "fDecelerationMs", m.decelTime * 1000.0f) / 1000.0f;
+
+	CrosshairConfig& x = g_cfg.xh;
+	x.enabled    = b("Crosshair", "bEnabled", x.enabled);
+	x.scale      = IniFloat(path, "Crosshair", "fSpreadScale", x.scale);
+	x.minGap     = IniFloat(path, "Crosshair", "fMinGap", x.minGap);
+	x.lineLength = IniFloat(path, "Crosshair", "fLineLength", x.lineLength);
+	x.thickness  = IniFloat(path, "Crosshair", "fThickness", x.thickness);
+	x.smoothTime = IniFloat(path, "Crosshair", "fSmoothMs", x.smoothTime * 1000.0f) / 1000.0f;
+	x.hudColor   = b("Crosshair", "bUseHUDColor", x.hudColor);
+	x.r          = GetPrivateProfileIntA("Crosshair", "iRed", x.r, path);
+	x.gr         = GetPrivateProfileIntA("Crosshair", "iGreen", x.gr, path);
+	x.b          = GetPrivateProfileIntA("Crosshair", "iBlue", x.b, path);
+	x.opacity    = IniFloat(path, "Crosshair", "fOpacity", x.opacity);
+	x.outline    = b("Crosshair", "bOutline", x.outline);
+	x.hideScoped = b("Crosshair", "bHideWhenScoped", x.hideScoped);
+	clampf(x.scale, 0.1f, 10.0f);
+	clampf(x.minGap, 0.0f, 100.0f);
+	clampf(x.lineLength, 1.0f, 100.0f);
+	clampf(x.thickness, 1.0f, 20.0f);
+	clampf(x.smoothTime, 0.0f, 1.0f);
+	clampf(x.opacity, 0.0f, 1.0f);
+	Log("config: Crosshair: bEnabled=%d fSpreadScale=%.2f fMinGap=%.1f fLineLength=%.1f fThickness=%.1f "
+	    "fSmoothMs=%.0f bUseHUDColor=%d rgb=%d,%d,%d fOpacity=%.2f bOutline=%d bHideWhenScoped=%d",
+	    x.enabled, x.scale, x.minGap, x.lineLength, x.thickness, x.smoothTime * 1000.0f, x.hudColor,
+	    x.r, x.gr, x.b, x.opacity, x.outline, x.hideScoped);
 
 	CameraConfig& c = g_cfg.cam;
 	c.enabled       = b("Camera", "bEnabled", c.enabled);
@@ -1427,6 +1478,265 @@ static void __fastcall Hook_CameraUpdate(NiAVObject* node, void* /*edx*/, void* 
 	((NiAVObjectUpdate_t)addr::kNiAVObjectUpdate)(node, updateData);
 }
 
+// ---------------------------------------------------------------------------------------------
+// Crosshair: four lines whose gap shows the gun's real spread cone (weapon spread and min spread,
+// times the game's own spread multiplier: condition, skill, crippled limbs, iron sights, stance,
+// movement and perks). Drawn with Direct3D just before each frame is presented; the vanilla
+// crosshair is hidden while it shows (and restored to the player's setting otherwise).
+
+static struct XhState {
+	bool     visible = false;
+	float    gap = 0.0f, gapVel = 0.0f;   // smoothed, pixels
+	int64_t  lastQpc = 0;
+	int      frustumOff = -1;             // NiCamera frustum offset, found at runtime (-2 = not found)
+	bool     vanillaHidden = false;
+	IDirect3DStateBlock9* sb = nullptr;
+} xh;
+
+struct WeapData {                         // TESObjectWEAP (FOSE GameForms.h)
+	uint8_t pad[0xF4];
+	uint8_t type;                         // F4  3..9 = guns
+	uint8_t padF5[0x100 - 0xF5];
+	uint8_t flags1;                       // 100 0x4 = has scope
+	uint8_t pad101[0x104 - 0x101];
+	float   minSpread;                    // 104 degrees
+	float   spread;                       // 108 degrees
+	uint32_t pad10C;
+	float   sightFOV;                     // 110
+};
+
+static WeapData* PlayerGun()
+{
+	void* proc = PlayerProcess();
+	if (!proc) return nullptr;
+	uint8_t* entry = VCall<uint8_t*>(proc, 0x148);
+	if (!entry) return nullptr;
+	uint8_t* form = *(uint8_t**)(entry + 8);
+	if (!form || form[4] != 0x28) return nullptr;  // kFormType_Weapon
+	WeapData* w = (WeapData*)form;
+	return (w->type >= 3 && w->type <= 9) ? w : nullptr;
+}
+
+// Right edge of the camera's view frustum (= tan of half the horizontal FOV), or 0 if unknown.
+static float CameraFrustumRight()
+{
+	uint8_t* root = *(uint8_t**)addr::kCameraRoot;
+	uint8_t* camera = root ? *(uint8_t**)(root + 0xAC) : nullptr;
+	if (!camera || xh.frustumOff == -2) return 0.0f;
+	auto plausible = [](const float* f) {
+		// left, right, top, bottom, near, far
+		return f[1] > 0.2f && f[1] < 4.0f && std::fabs(f[0] + f[1]) < 1e-3f && f[2] > 0.1f &&
+		       f[2] < 4.0f && std::fabs(f[3] + f[2]) < 1e-3f && f[4] > 0.0f && f[5] > f[4];
+	};
+	if (xh.frustumOff < 0) {
+		for (int off = 0x9C; off <= 0x140; off += 4)
+			if (plausible((const float*)(camera + off))) { xh.frustumOff = off; break; }
+		const float* f = xh.frustumOff >= 0 ? (const float*)(camera + xh.frustumOff) : nullptr;
+		if (f) Log("crosshair: camera frustum at +0x%X (right %.3f = %.1f deg FOV)", xh.frustumOff, f[1],
+		           2.0f * std::atan(f[1]) * kRadToDeg);
+		else { Log("WARNING: camera frustum not found; crosshair uses a 75 degree FOV"); xh.frustumOff = -2; return 0.0f; }
+	}
+	const float* f = (const float*)(camera + xh.frustumOff);
+	return plausible(f) ? f[1] : 0.0f;
+}
+
+static void SetVanillaCrosshair(bool hide)
+{
+	uint8_t* hud = *(uint8_t**)addr::kHUDMainMenu;
+	if (!hud) return;
+	uint32_t& mask = *(uint32_t*)(hud + 0x190);
+	const bool userWants = *(bool*)(addr::kSettingCrosshair + 4);
+	const bool show = userWants && !hide;
+	if (show) mask |= 0x40;
+	else mask &= ~0x40u;
+	xh.vanillaHidden = hide;
+}
+
+// Works out whether to draw and the target gap in pixels.
+static bool CrosshairTarget(float width, float* gapOut)
+{
+	if (!Player() || !PlayerRoot() || !g_stateChecksOk) return false;
+	if (((bool(__cdecl*)())addr::kIsMenuMode)()) return false;
+	if (!PlayerWeaponOut()) return false;
+	WeapData* w = PlayerGun();
+	if (!w) return false;
+	float right = CameraFrustumRight();
+	if (right <= 0.0f) right = std::tan(37.5f * kDegToRad);
+	if (g_cfg.xh.hideScoped && (w->flags1 & 0x4) && w->sightFOV > 0.0f) {
+		const float fov = 2.0f * std::atan(right) * kRadToDeg;
+		if (std::fabs(fov - w->sightFOV) < 3.0f) return false;  // looking through the scope
+	}
+	const float mult = ((float(__thiscall*)(void*, int))addr::kGetWeaponStat)(Player(), 2);
+	float deg = w->spread * mult + w->minSpread;
+	if (!std::isfinite(deg) || deg < 0.0f) deg = 0.0f;
+	if (deg > 45.0f) deg = 45.0f;
+	*gapOut = std::tan(deg * kDegToRad) / right * (width * 0.5f) * g_cfg.xh.scale;
+	return true;
+}
+
+struct XhVertex { float x, y, z, rhw; D3DCOLOR c; };
+
+static void FillRect(IDirect3DDevice9* dev, float x0, float y0, float x1, float y1, D3DCOLOR c)
+{
+	x0 -= 0.5f; y0 -= 0.5f; x1 -= 0.5f; y1 -= 0.5f;  // pixel centres
+	const XhVertex v[4] = { { x0, y0, 0, 1, c }, { x1, y0, 0, 1, c }, { x0, y1, 0, 1, c }, { x1, y1, 0, 1, c } };
+	dev->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, v, sizeof(XhVertex));
+}
+
+static void DrawCrosshair(IDirect3DDevice9* dev)
+{
+	const CrosshairConfig& cc = g_cfg.xh;
+	IDirect3DSurface9* bb = nullptr;
+	if (FAILED(dev->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &bb)) || !bb) return;
+	D3DSURFACE_DESC desc;
+	bb->GetDesc(&desc);
+	const float W = (float)desc.Width, H = (float)desc.Height;
+
+	const int64_t now = QpcNow();
+	const double dt = xh.lastQpc ? (double)(now - xh.lastQpc) / g_qpcFreq : 0.0;
+	xh.lastQpc = now;
+
+	float target = 0.0f;
+	const bool show = CrosshairTarget(W, &target);
+	if (show != xh.vanillaHidden) SetVanillaCrosshair(show);
+	if (!show) {
+		xh.visible = false;
+		bb->Release();
+		return;
+	}
+	const float k = H / 1080.0f;  // resolution scale
+	const float minGap = cc.minGap * k;
+	if (target < minGap) target = minGap;
+	if (target > H * 0.4f) target = H * 0.4f;
+	if (!xh.visible) { xh.gap = target; xh.gapVel = 0.0f; }  // appear at the right size
+	else xh.gap = SmoothDamp(xh.gap, target, &xh.gapVel, dt > 0.1 ? 0.1 : dt, cc.smoothTime);
+	xh.visible = true;
+
+	uint32_t rgb = (uint32_t)((cc.r & 255) << 16 | (cc.gr & 255) << 8 | (cc.b & 255));
+	if (cc.hudColor) {
+		const GameSettingF* s = (const GameSettingF*)addr::kSettingHUDColor;
+		if (!IsBadReadPtr(s->name, 20) && memcmp(s->name, "uHUDColor:Interface", 20) == 0) {
+			const uint32_t v = *(const uint32_t*)&s->value;  // R G B A, R in the high byte
+			rgb = v >> 8;
+		}
+	}
+	const uint32_t a = (uint32_t)(cc.opacity * 255.0f + 0.5f);
+	const D3DCOLOR color = (a << 24) | rgb;
+	const D3DCOLOR shadow = ((uint32_t)(cc.opacity * 0.6f * 255.0f + 0.5f) << 24);
+
+	if (!xh.sb) dev->CreateStateBlock(D3DSBT_ALL, &xh.sb);
+	if (xh.sb) xh.sb->Capture();
+	IDirect3DSurface9* oldRT = nullptr;
+	dev->GetRenderTarget(0, &oldRT);
+	dev->SetRenderTarget(0, bb);
+	D3DVIEWPORT9 vp = { 0, 0, desc.Width, desc.Height, 0.0f, 1.0f };
+	dev->SetViewport(&vp);
+	dev->SetVertexShader(nullptr);
+	dev->SetPixelShader(nullptr);
+	dev->SetFVF(D3DFVF_XYZRHW | D3DFVF_DIFFUSE);
+	dev->SetTexture(0, nullptr);
+	dev->SetRenderState(D3DRS_ZENABLE, FALSE);
+	dev->SetRenderState(D3DRS_ZWRITEENABLE, FALSE);
+	dev->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
+	dev->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_SRCALPHA);
+	dev->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA);
+	dev->SetRenderState(D3DRS_ALPHATESTENABLE, FALSE);
+	dev->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
+	dev->SetRenderState(D3DRS_LIGHTING, FALSE);
+	dev->SetRenderState(D3DRS_FOGENABLE, FALSE);
+	dev->SetRenderState(D3DRS_STENCILENABLE, FALSE);
+	dev->SetRenderState(D3DRS_SCISSORTESTENABLE, FALSE);
+	dev->SetRenderState(D3DRS_COLORWRITEENABLE, 0xF);
+	dev->SetRenderState(D3DRS_SRGBWRITEENABLE, FALSE);
+	dev->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+	dev->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_DIFFUSE);
+	dev->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1);
+	dev->SetTextureStageState(0, D3DTSS_ALPHAARG1, D3DTA_DIFFUSE);
+	dev->SetTextureStageState(1, D3DTSS_COLOROP, D3DTOP_DISABLE);
+	dev->SetTextureStageState(1, D3DTSS_ALPHAOP, D3DTOP_DISABLE);
+
+	if (SUCCEEDED(dev->BeginScene())) {
+		const float cx = std::floor(W * 0.5f), cy = std::floor(H * 0.5f);
+		const float g = std::floor(xh.gap + 0.5f);
+		const float len = std::fmax(2.0f, std::floor(cc.lineLength * k + 0.5f));
+		const float t = std::fmax(1.0f, std::floor(cc.thickness * k + 0.5f));
+		const float h0 = std::floor(t * 0.5f), h1 = t - h0;  // thickness split around the centre
+		auto lines = [&](float o, D3DCOLOR c) {
+			FillRect(dev, cx - h0 - o, cy - g - len - o, cx + h1 + o, cy - g + o, c);  // top
+			FillRect(dev, cx - h0 - o, cy + g - o, cx + h1 + o, cy + g + len + o, c);  // bottom
+			FillRect(dev, cx - g - len - o, cy - h0 - o, cx - g + o, cy + h1 + o, c);  // left
+			FillRect(dev, cx + g - o, cy - h0 - o, cx + g + len + o, cy + h1 + o, c);  // right
+		};
+		if (cc.outline) lines(1.0f, shadow);
+		lines(0.0f, color);
+		dev->EndScene();
+	}
+
+	dev->SetRenderTarget(0, oldRT);
+	if (oldRT) oldRT->Release();
+	if (xh.sb) xh.sb->Apply();
+	bb->Release();
+}
+
+typedef HRESULT(__stdcall* D3DPresent_t)(IDirect3DDevice9*, const RECT*, const RECT*, HWND, const RGNDATA*);
+typedef HRESULT(__stdcall* D3DReset_t)(IDirect3DDevice9*, D3DPRESENT_PARAMETERS*);
+static D3DPresent_t g_origPresent;
+static D3DReset_t   g_origReset;
+
+static HRESULT __stdcall Hook_Present(IDirect3DDevice9* dev, const RECT* src, const RECT* dst, HWND wnd,
+                                      const RGNDATA* dirty)
+{
+	DrawCrosshair(dev);
+	return g_origPresent(dev, src, dst, wnd, dirty);
+}
+
+static HRESULT __stdcall Hook_Reset(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS* pp)
+{
+	if (xh.sb) { xh.sb->Release(); xh.sb = nullptr; }
+	return g_origReset(dev, pp);
+}
+
+// Direct3D isn't imported by the game (it is loaded at runtime), so a throwaway device is created
+// here to find the device class's Present/Reset, which the game's device shares.
+static bool HookD3D9()
+{
+	WNDCLASSA wc = {};
+	wc.lpfnWndProc = DefWindowProcA;
+	wc.hInstance = GetModuleHandleA(nullptr);
+	wc.lpszClassName = "STRIDE_d3d9_probe";
+	RegisterClassA(&wc);
+	HWND hwnd = CreateWindowA(wc.lpszClassName, "", WS_OVERLAPPEDWINDOW, 0, 0, 16, 16, nullptr, nullptr,
+	                          wc.hInstance, nullptr);
+	bool ok = false;
+	IDirect3D9* d3d = hwnd ? Direct3DCreate9(D3D_SDK_VERSION) : nullptr;
+	if (d3d) {
+		D3DPRESENT_PARAMETERS pp = {};
+		pp.Windowed = TRUE;
+		pp.SwapEffect = D3DSWAPEFFECT_DISCARD;
+		pp.BackBufferFormat = D3DFMT_UNKNOWN;
+		pp.hDeviceWindow = hwnd;
+		IDirect3DDevice9* dev = nullptr;
+		if (SUCCEEDED(d3d->CreateDevice(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, hwnd,
+		                                D3DCREATE_SOFTWARE_VERTEXPROCESSING, &pp, &dev)) && dev) {
+			void** vt = *(void***)dev;
+			DWORD old;
+			if (VirtualProtect(&vt[16], 2 * sizeof(void*), PAGE_EXECUTE_READWRITE, &old)) {
+				g_origReset = (D3DReset_t)vt[16];
+				g_origPresent = (D3DPresent_t)vt[17];
+				vt[16] = (void*)&Hook_Reset;
+				vt[17] = (void*)&Hook_Present;
+				VirtualProtect(&vt[16], 2 * sizeof(void*), old, &old);
+				ok = true;
+			}
+			dev->Release();
+		}
+		d3d->Release();
+	}
+	if (hwnd) DestroyWindow(hwnd);
+	UnregisterClassA(wc.lpszClassName, wc.hInstance);
+	return ok;
+}
+
 static bool PatchVtableSlot(uintptr_t vtbl, uintptr_t slot, uintptr_t expect, void* fn)
 {
 	uintptr_t* p = (uintptr_t*)(vtbl + slot);
@@ -1544,6 +1854,30 @@ __declspec(dllexport) bool FOSEPlugin_Load(const FOSEInterface* fose)
 		                  memcmp((const void*)addr::kGetKnockedUse, knock, sizeof(knock)) == 0;
 		if (!g_stateChecksOk && g_cfg.look.enabled)
 			Log("WARNING: game state functions do not match; free look disabled");
+	}
+
+	if (g_cfg.xh.enabled) {
+		// The crosshair uses these game functions/globals; check the code that references them.
+		const uint8_t isMenu[] = { 0xA1, 0x24, 0x5B, 0x07, 0x01, 0x85, 0xC0 };
+		const uint8_t stat[] = { 0x83, 0xEC, 0x10, 0x56, 0x8B, 0xF1, 0x8B, 0x4E, 0x60, 0x85, 0xC9 };
+		const uint8_t statWeap[] = { 0x8B, 0x01, 0x8B, 0x90, 0x48, 0x01, 0x00, 0x00 };
+		const uint8_t hudXor[] = { 0xA2, 0xEC, 0x5A, 0x07, 0x01, 0xA1, 0xB4, 0x62, 0x07, 0x01 };
+		const uint8_t hudBit[] = { 0x83, 0xB0, 0x90, 0x01, 0x00, 0x00, 0x40 };
+		const uint8_t camRoot[] = { 0xA1, 0x24, 0xA2, 0x07, 0x01 };
+		const uint8_t spread[] = { 0xD9, 0x86, 0x04, 0x01, 0x00, 0x00 };  // fld [esi+104h] (minSpread)
+		const bool match = memcmp((const void*)addr::kIsMenuMode, isMenu, sizeof(isMenu)) == 0 &&
+		                   memcmp((const void*)addr::kGetWeaponStat, stat, sizeof(stat)) == 0 &&
+		                   memcmp((const void*)0x00701C71, statWeap, sizeof(statWeap)) == 0 &&
+		                   memcmp((const void*)0x0067B115, hudXor, sizeof(hudXor)) == 0 &&
+		                   memcmp((const void*)0x0067B123, hudBit, sizeof(hudBit)) == 0 &&
+		                   memcmp((const void*)0x0077D6C8, camRoot, sizeof(camRoot)) == 0 &&
+		                   memcmp((const void*)0x004BE71D, spread, sizeof(spread)) == 0;
+		if (!match)
+			Log("WARNING: crosshair code does not match; crosshair disabled");
+		else if (HookD3D9())
+			Log("hooked Direct3D 9 Present/Reset for the crosshair");
+		else
+			Log("WARNING: could not hook Direct3D 9; crosshair disabled");
 	}
 
 	if (g_cfg.cam.enabled) {
