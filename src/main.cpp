@@ -70,7 +70,20 @@ namespace addr {
 	// (0x45D370, thiscall, ret 10h). With movement flag 0x40 set (always, for the player) this
 	// animation root-motion vector, in the actor's local frame, is the direction you move.
 	constexpr uintptr_t kCallAnimMoveVector = 0x007E89ED;
+	constexpr uintptr_t kFrameDelta         = 0x01090BAC;  // main TimeGlobal frame delta (game seconds), as used by 0x45D370
+	constexpr uintptr_t kActorMove          = 0x00709320;  // Actor::Move, vtable +0x250
+	constexpr uintptr_t kSlotActorMove      = 0x250;
+	constexpr uintptr_t kPlayerVtbl         = 0x00E18114;
+	constexpr uintptr_t kPlayerMoverMoveRet = 0x007E8C8E;  // return address of PlayerMover's call (call edx at 0x7E8C8C)
 	constexpr uintptr_t kAnimMoveVector     = 0x0045D370;
+	// Third person camera update (around 0x77DD60): the final camera position is written to the
+	// camera node's local translation (0x77E4C9), then NiAVObject::Update (0x8264C0, thiscall,
+	// one arg) is called on it here.
+	constexpr uintptr_t kCallCameraUpdate   = 0x0077E538;
+	constexpr uintptr_t kNiAVObjectUpdate   = 0x008264C0;
+	// Game settings {vtbl, value, name}: camera side offset and the aim point beside the player.
+	constexpr uintptr_t kSettingShoulderX   = 0x00F5EAFC;  // fOverShoulderPosX (40)
+	constexpr uintptr_t kSettingAimPointX   = 0x00F5EB44;  // fOverShoulderOffsetPointX (98.4)
 	constexpr uintptr_t kSetMovementFlags   = 0x007E8F70;
 	constexpr uintptr_t kSlotSetMovementFlags = 0x0C;
 	// Game state checks, taken from the script condition functions IsWeaponOut (0x510E50 ->
@@ -186,6 +199,18 @@ struct MoveConfig {                 // angles in radians, times in seconds
 	float leanMax       = 8.0f * kDegToRad;
 	float leanPerTurn   = 4.0f / 100.0f;        // degrees of lean per degree/second of turning
 	float leanTime      = 0.15f;                // lean smoothing
+	bool  accel         = true;                 // ease into / out of movement
+	float accelTime     = 0.06f;
+	float decelTime     = 0.06f;
+};
+
+struct CameraConfig {               // times in seconds
+	bool  enabled       = true;
+	float pivotSmoothZ  = 0.10f;    // smoothing of the height of the point the camera follows
+	bool  shoulderSwap  = true;
+	int   shoulderKey   = VK_MBUTTON;
+	float shoulderTime  = 0.167f;
+	bool  vanityFix     = true;     // vanity camera orbits keep the player on the same screen side
 };
 
 static struct Config {
@@ -202,6 +227,7 @@ static struct Config {
 	TurnConfig turn;
 	FreeLookConfig look;
 	MoveConfig move;
+	CameraConfig cam;
 	char  bodyNode[64]   = "Scene Root";  // whole body turn; Scene Root = the actor's 3D root
 	bool  footIKOff      = false;   // pause the game's foot IK while the body/legs are turned
 	char  legsNode[64]   = "Bip01 Pelvis";
@@ -286,6 +312,23 @@ static void LoadConfig()
 	m.leanMax       = deg("Moving", "fLeanMax", m.leanMax);
 	m.leanPerTurn   = IniFloat(path, "Moving", "fLeanPer100DegPerSec", m.leanPerTurn * 100.0f) / 100.0f;
 	m.leanTime      = IniFloat(path, "Moving", "fLeanTimeMs", m.leanTime * 1000.0f) / 1000.0f;
+	m.accel         = b("Moving", "bAcceleration", m.accel);
+	m.accelTime     = IniFloat(path, "Moving", "fAccelerationMs", m.accelTime * 1000.0f) / 1000.0f;
+	m.decelTime     = IniFloat(path, "Moving", "fDecelerationMs", m.decelTime * 1000.0f) / 1000.0f;
+
+	CameraConfig& c = g_cfg.cam;
+	c.enabled       = b("Camera", "bEnabled", c.enabled);
+	c.pivotSmoothZ  = IniFloat(path, "Camera", "fFollowSmoothVerticalMs", c.pivotSmoothZ * 1000.0f) / 1000.0f;
+	c.vanityFix     = b("Camera", "bVanityOrbitFix", c.vanityFix);
+	c.shoulderSwap  = b("Camera", "bShoulderSwap", c.shoulderSwap);
+	c.shoulderKey   = GetPrivateProfileIntA("Camera", "iShoulderSwapKey", c.shoulderKey, path);
+	c.shoulderTime  = IniFloat(path, "Camera", "fShoulderSwapMs", c.shoulderTime * 1000.0f) / 1000.0f;
+	clampf(c.pivotSmoothZ, 0.0f, 1.0f);
+	clampf(c.shoulderTime, 0.0f, 3.0f);
+	Log("config: Camera: bEnabled=%d fFollowSmoothVerticalMs=%.0f bVanityOrbitFix=%d "
+	    "bShoulderSwap=%d iShoulderSwapKey=0x%X fShoulderSwapMs=%.0f",
+	    c.enabled, c.pivotSmoothZ * 1000.0f, c.vanityFix,
+	    c.shoulderSwap, c.shoulderKey, c.shoulderTime * 1000.0f);
 
 	GetPrivateProfileStringA("Skeleton", "sBodyNode", g_cfg.bodyNode, g_cfg.bodyNode, sizeof(g_cfg.bodyNode), path);
 	g_cfg.footIKOff = b("Skeleton", "bDisableFootIKWhenTurned", g_cfg.footIKOff);
@@ -315,6 +358,8 @@ static void LoadConfig()
 	clampf(m.leanMax, 0.0f, 30.0f * kDegToRad);
 	clampf(m.leanPerTurn, 0.0f, 1.0f);
 	clampf(m.leanTime, 0.0f, 2.0f);
+	clampf(m.accelTime, 0.0f, 2.0f);
+	clampf(m.decelTime, 0.0f, 2.0f);
 
 	Log("config: bEnabled=%d fUpperBodyTurn=%.2f | Diagonal: bEnabled=%d fMaxAngle=%.1f fTurnTimeMs=%.0f "
 	    "bBackDiagonals=%d | TurnInPlace: bEnabled=%d fThreshold=%.1f fMaxTwist=%.1f fCatchUpSpeed=%.0f "
@@ -336,6 +381,8 @@ static void LoadConfig()
 	    "fLeanPer100DegPerSec=%.2f fLeanTimeMs=%.0f",
 	    m.legLag, m.torsoLag, m.legLagMax * kRadToDeg, m.legLagTime * 1000.0f, m.lean, m.leanMax * kRadToDeg,
 	    m.leanPerTurn * 100.0f, m.leanTime * 1000.0f);
+	Log("config: Moving: bAcceleration=%d fAccelerationMs=%.0f fDecelerationMs=%.0f", m.accel,
+	    m.accelTime * 1000.0f, m.decelTime * 1000.0f);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1039,6 +1086,33 @@ typedef void(__thiscall* SetMovementFlags_t)(void*, uint32_t);
 static SetMovementFlags_t g_origSetMovementFlags;
 static bool g_strafeMoveHooked;  // Hook_AnimMoveVector installed (strafe-as-run needs it)
 
+// Acceleration: the movement vector handed to Actor::Move (player's local frame, x right,
+// y forward). Turned into a velocity with the game's frame delta and eased toward the
+// target with a critically damped spring, so starting, stopping and walk/run changes take about
+// fAccelerationMs / fDecelerationMs instead of being instant. Works in first and third person.
+static struct MoveSmooth {
+	NiPoint3 vel = {}, rate = {};
+} mv;
+
+static void SmoothMovement(NiPoint3& d)
+{
+	const MoveConfig& mc = g_cfg.move;
+	const float dt = *(float*)addr::kFrameDelta;
+	if (!(dt > 0.0f && dt < 0.25f)) {  // paused or after a hitch/load: start fresh
+		mv = MoveSmooth();
+		return;
+	}
+	const float tx = d.x / dt, ty = d.y / dt;
+	const float target = std::sqrt(tx * tx + ty * ty);
+	const float current = std::sqrt(mv.vel.x * mv.vel.x + mv.vel.y * mv.vel.y);
+	const float time = target < current ? mc.decelTime : mc.accelTime;
+	mv.vel.x = SmoothDamp(mv.vel.x, tx, &mv.rate.x, dt, time);
+	mv.vel.y = SmoothDamp(mv.vel.y, ty, &mv.rate.y, dt, time);
+	if (target == 0.0f && mv.vel.x * mv.vel.x + mv.vel.y * mv.vel.y < 1.0f) mv = MoveSmooth();
+	d.x = mv.vel.x * dt;
+	d.y = mv.vel.y * dt;  // z (root motion height) is left as is
+}
+
 // The forward run's root motion points forward; while a strafe is played as a forward run, turn
 // it 90 degrees so you still move sideways (at the forward walk/run speed).
 typedef bool(__thiscall* AnimMoveVector_t)(void*, NiPoint3*, void*, int, int);
@@ -1052,6 +1126,18 @@ static bool __fastcall Hook_AnimMoveVector(void* animData, void* /*edx*/, NiPoin
 		else                            { out->x = y;  out->y = -x; }  // forward -> right (+x)
 	}
 	return r;
+}
+
+// Actor::Move (0x709320, vtable +0x250, thiscall (float, NiPoint3* move, UInt32 flags), ret 0Ch):
+// the final hand-off of the player's movement, after PlayerMover's diagonal correction (which
+// rebuilds the vector from scratch, so smoothing earlier missed diagonals). Patched in the
+// PlayerCharacter vtable only, and only the call from PlayerMover's update is smoothed.
+typedef uint32_t(__thiscall* ActorMove_t)(void*, float, NiPoint3*, uint32_t);
+static uint32_t __fastcall Hook_PlayerMove(void* actor, void* /*edx*/, float f, NiPoint3* move, uint32_t flags)
+{
+	if (g_cfg.move.accel && move && __builtin_return_address(0) == (void*)addr::kPlayerMoverMoveRet)
+		SmoothMovement(*move);
+	return ((ActorMove_t)addr::kActorMove)(actor, f, move, flags);
 }
 
 static void __fastcall Hook_SetMovementFlags(void* mover, void* /*edx*/, uint32_t flags)
@@ -1120,6 +1206,167 @@ static void __fastcall Hook_UpdateWorldData(NiAVObject* self, void* /*edx*/, voi
 				if (p == root) { Rescan(root); break; }
 		}
 	}
+}
+
+// ---------------------------------------------------------------------------------------------
+// Third person camera (hooked at the camera node's update call, after the game has computed and
+// written the camera position, before it is finalized)
+//
+//   Follow smoothing: the camera position is split into the player's position (the point it
+//   follows) plus the orbit offset. Only the followed point's height is smoothed, so stair/landing bobs
+//   are softened while mouse rotation stays exact.
+//   Shoulder swap: a key eases fOverShoulderPosX and the aim point beside the player
+//   (fOverShoulderOffsetPointX) over to the other side.
+
+struct GameSettingF { void* vtbl; float value; const char* name; };
+
+static struct CamState {
+	bool          init = false;
+	NiPoint3      follow = {}, followVel = {};
+	float         normalLat = 0.0f;   // player's sideways view offset in normal play (vanity fix)
+	bool          haveLat = false;
+	bool          parentChecked = false, parentOk = false;
+	GameSettingF* shoulderX = nullptr;
+	GameSettingF* aimX = nullptr;
+	bool          settingsChecked = false;
+	float         baseShoulderX = 0.0f, baseAimX = 0.0f;
+	float         shoulder = 1.0f, shoulderVel = 0.0f, shoulderTarget = 1.0f;
+	bool          keyDown = false;
+	int64_t       lastQpc = 0;
+} cam;
+
+static GameSettingF* FindSetting(uintptr_t at, const char* name)
+{
+	GameSettingF* s = (GameSettingF*)at;
+	const size_t len = strlen(name) + 1;
+	if (!IsBadReadPtr(s->name, len) && memcmp(s->name, name, len) == 0) return s;
+	Log("WARNING: setting %s not found at %08X; shoulder swap disabled", name, (unsigned)at);
+	return nullptr;
+}
+
+static bool GameHasFocus()
+{
+	DWORD pid = 0;
+	GetWindowThreadProcessId(GetForegroundWindow(), &pid);
+	return pid == GetCurrentProcessId();
+}
+
+static void UpdateShoulder(double dt)
+{
+	const CameraConfig& cc = g_cfg.cam;
+	if (!cam.settingsChecked) {
+		// Game settings are built by static initializers after plugins load; check on first use.
+		cam.settingsChecked = true;
+		cam.shoulderX = FindSetting(addr::kSettingShoulderX, "fOverShoulderPosX");
+		cam.aimX = cam.shoulderX ? FindSetting(addr::kSettingAimPointX, "fOverShoulderOffsetPointX") : nullptr;
+		if (!cam.aimX) cam.shoulderX = nullptr;
+		if (cam.shoulderX) {
+			cam.baseShoulderX = cam.shoulderX->value;
+			cam.baseAimX = cam.aimX->value;
+			Log("shoulder swap ready (fOverShoulderPosX %.1f, fOverShoulderOffsetPointX %.1f)",
+			    cam.baseShoulderX, cam.baseAimX);
+		}
+	}
+	if (!cam.shoulderX) return;
+
+	const bool down = cc.shoulderKey > 0 && cc.shoulderKey < 256 && GameHasFocus() &&
+	                  (GetAsyncKeyState(cc.shoulderKey) & 0x8000);
+	if (down && !cam.keyDown) {
+		cam.shoulderTarget = -cam.shoulderTarget;
+		if (g_cfg.debug) Log("shoulder swap -> %s", cam.shoulderTarget > 0 ? "right" : "left");
+	}
+	cam.keyDown = down;
+	cam.shoulder = SmoothDamp(cam.shoulder, cam.shoulderTarget, &cam.shoulderVel, dt, cc.shoulderTime);
+	cam.shoulderX->value = cam.baseShoulderX * cam.shoulder;
+	cam.aimX->value = cam.baseAimX * cam.shoulder;
+}
+
+static float Length(const NiPoint3& v) { return std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z); }
+
+static void SmoothCamera(NiAVObject* node, double dt)
+{
+	const CameraConfig& cc = g_cfg.cam;
+	if (!cam.parentChecked) {
+		// The node's local position must be in world space (parent at the origin, unrotated).
+		cam.parentChecked = true;
+		const NiAVObject* p = node->parent;
+		const NiTransform& w = p ? p->world : node->local;
+		bool ok = !p || (std::fabs(w.scale - 1.0f) < 1e-3f && std::fabs(w.pos.x) < 1e-2f &&
+		                 std::fabs(w.pos.y) < 1e-2f && std::fabs(w.pos.z) < 1e-2f);
+		for (int i = 0; ok && p && i < 3; i++)
+			for (int j = 0; j < 3; j++)
+				if (std::fabs(w.rot.m[i][j] - (i == j ? 1.0f : 0.0f)) > 1e-3f) ok = false;
+		cam.parentOk = ok;
+		Log(ok ? "camera node %p: world space, smoothing active"
+		       : "WARNING: camera node %p is not in world space; smoothing disabled", (void*)node);
+	}
+	if (!cam.parentOk) return;
+
+	uint8_t* pc = (uint8_t*)Player();
+	if (!pc) return;
+	const NiPoint3 P = *(NiPoint3*)(pc + off::kRefrPos);
+	NiPoint3& T = node->local.pos;
+
+	const NiPoint3 lag = { cam.follow.x - P.x, cam.follow.y - P.y, cam.follow.z - P.z };
+	if (!cam.init || Length(lag) > 300.0f) {  // first frame, teleport, load
+		cam.init = true;
+		cam.follow = P;
+		cam.followVel = {};
+	}
+	// Only height is smoothed; horizontally the camera follows exactly (horizontal smoothing was
+	// tried at 30 and 100 ms and dropped both times, 2026-10-09).
+	cam.follow.x = P.x;
+	cam.follow.y = P.y;
+	cam.follow.z = SmoothDamp(cam.follow.z, P.z, &cam.followVel.z, dt, cc.pivotSmoothZ);
+	NiPoint3 S = { T.x + cam.follow.x - P.x, T.y + cam.follow.y - P.y, T.z + cam.follow.z - P.z };
+
+	// (Easing the camera back out after walls was tried three ways and dropped, 2026-10-10: vanilla
+	// already slides it out linearly in ~0.1 s, and slowing that down didn't feel better.)
+
+	// Vanity camera (hold POV key / idle): vanilla orbits around the over-the-shoulder point beside
+	// the player, so after half a turn the player is on the other side of the crosshair. Keep the
+	// player at the same sideways screen offset as in normal play by sliding the camera along its
+	// own horizontal right axis (rotation untouched).
+	if (cc.vanityFix) {
+		NiPoint3 toP = { P.x - S.x, P.y - S.y, 0.0f };
+		// Horizontal view direction: the camera rotation's column that best points at the player.
+		const NiMatrix3& R = node->local.rot;
+		float vx = 0.0f, vy = 0.0f, best = 0.0f;
+		for (int col = 0; col < 3; col++) {
+			const float cx = R.m[0][col], cy = R.m[1][col];
+			const float dot = cx * toP.x + cy * toP.y;
+			if (std::fabs(dot) > std::fabs(best)) { best = dot; vx = dot > 0 ? cx : -cx; vy = dot > 0 ? cy : -cy; }
+		}
+		const float len = std::sqrt(vx * vx + vy * vy);
+		if (len > 0.1f) {
+			const float rx = vy / len, ry = -vx / len;    // horizontal right of the view direction
+			const float lat = toP.x * rx + toP.y * ry;   // player's sideways offset in view space
+			if (!*(bool*)addr::kVanityCamera) {
+				cam.normalLat = lat;
+				cam.haveLat = true;
+			} else if (cam.haveLat) {
+				const float shift = lat - cam.normalLat;
+				S.x += rx * shift;
+				S.y += ry * shift;
+			}
+		}
+	}
+	T = S;
+}
+
+typedef void(__thiscall* NiAVObjectUpdate_t)(NiAVObject*, void*);
+static void __fastcall Hook_CameraUpdate(NiAVObject* node, void* /*edx*/, void* updateData)
+{
+	LARGE_INTEGER li;
+	QueryPerformanceCounter(&li);
+	double dt = cam.lastQpc ? (double)(li.QuadPart - cam.lastQpc) / g_qpcFreq : 0.0;
+	cam.lastQpc = li.QuadPart;
+	if (dt > 0.25) { dt = 0.25; cam.init = false; }  // after a pause/load: start fresh
+
+	if (g_cfg.cam.shoulderSwap) UpdateShoulder(dt);
+	if (node && InThirdPerson()) SmoothCamera(node, dt);
+	else cam.init = false;
+	((NiAVObjectUpdate_t)addr::kNiAVObjectUpdate)(node, updateData);
 }
 
 static bool PatchVtableSlot(uintptr_t vtbl, uintptr_t slot, uintptr_t expect, void* fn)
@@ -1239,6 +1486,31 @@ __declspec(dllexport) bool FOSEPlugin_Load(const FOSEInterface* fose)
 		                  memcmp((const void*)addr::kGetKnockedUse, knock, sizeof(knock)) == 0;
 		if (!g_stateChecksOk && g_cfg.look.enabled)
 			Log("WARNING: game state functions do not match; free look disabled");
+	}
+
+	if (g_cfg.cam.enabled) {
+		// call rel32 -> NiAVObject::Update for the third person camera node
+		const uintptr_t at = addr::kCallCameraUpdate;
+		if (*(uint8_t*)at == 0xE8 && at + 5 + *(int32_t*)(at + 1) == addr::kNiAVObjectUpdate) {
+			DWORD old;
+			VirtualProtect((void*)at, 5, PAGE_EXECUTE_READWRITE, &old);
+			*(int32_t*)(at + 1) = (int32_t)((uintptr_t)&Hook_CameraUpdate - (at + 5));
+			VirtualProtect((void*)at, 5, old, &old);
+			FlushInstructionCache(GetCurrentProcess(), (void*)at, 5);
+			Log("hooked third person camera update at %08X", (unsigned)at);
+		} else {
+			Log("WARNING: camera update call not found; camera features disabled");
+		}
+	}
+
+	if (g_cfg.move.accel) {
+		const uint8_t callEdx[] = { 0xFF, 0xD2 };
+		if (memcmp((const void*)(addr::kPlayerMoverMoveRet - 2), callEdx, 2) == 0 &&
+		    PatchVtableSlot(addr::kPlayerVtbl, addr::kSlotActorMove, addr::kActorMove, (void*)&Hook_PlayerMove))
+			Log("hooked PlayerCharacter::Move (vtable %08X+%X)", (unsigned)addr::kPlayerVtbl,
+			    (unsigned)addr::kSlotActorMove);
+		else
+			Log("WARNING: Actor::Move not hooked; acceleration disabled");
 	}
 
 	if (g_cfg.strafeAsRun) {
