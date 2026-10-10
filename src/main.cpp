@@ -91,6 +91,8 @@ namespace addr {
 	constexpr uintptr_t kIsWeaponOut        = 0x006F6C70;  // process vfunc +0x450
 	constexpr uintptr_t kGetSittingUse      = 0x0050F9F2;  // actor vfunc +0x214
 	constexpr uintptr_t kGetKnockedUse      = 0x00510F00;  // process vfunc +0x408
+	// Actor::IsDead (actor vfunc +0x22C, called by GetDead 0x50F840): reads the life state +0xFC.
+	constexpr uintptr_t kIsDead             = 0x0070C940;
 	constexpr uintptr_t kVanityCamera       = 0x0107BA5B;  // bool, hold-POV / idle vanity camera
 }
 
@@ -105,6 +107,7 @@ namespace off {
 	constexpr uintptr_t kRefrRotZ        = 0x28;   // TESObjectREFR heading, radians
 	constexpr uintptr_t kRefrPos         = 0x2C;   // TESObjectREFR position (feet for actors)
 	constexpr uintptr_t kActorProcess    = 0x60;   // Actor -> BaseProcess
+	constexpr uintptr_t kActorLifeState  = 0xFC;   // Actor -> life state (0 alive, 1 dying, 2 dead, ...)
 	constexpr uintptr_t kRefrRenderState = 0x5C;   // TESObjectREFR -> render state
 	constexpr uintptr_t kRenderStateNode = 0x14;   // render state -> 3rd person root NiNode
 	constexpr uintptr_t kPlayerMover     = 0x184;  // PlayerCharacter -> PlayerMover
@@ -495,6 +498,23 @@ static uint32_t PlayerKnockState()      // 1..4 = exploding/knocked down/getting
 	return proc ? VCall<uint32_t>(proc, vslot::kProcessKnockState) : 0;
 }
 
+static bool g_lifeStateOk;  // Actor::IsDead matched at load (life state offset confirmed)
+
+// Non-null while the player's skeleton is (or may be) driven by the Havok ragdoll: dying, dead,
+// unconscious, or knocked down by an explosion. Bones must not be touched then: turning them under
+// the ragdoll makes the physics explode (body and death camera thrown kilometres away).
+static const char* PlayerRagdollReason()
+{
+	uint8_t* pc = (uint8_t*)Player();
+	if (!pc) return nullptr;
+	if (g_lifeStateOk && *(uint32_t*)(pc + off::kActorLifeState) != 0) return "dead/dying";
+	if (g_stateChecksOk) {
+		const uint32_t knock = PlayerKnockState();
+		if (knock >= 1 && knock <= 4) return "knocked down";
+	}
+	return nullptr;
+}
+
 static uint32_t PlayerMoveFlags()
 {
 	uint8_t* pc = (uint8_t*)Player();
@@ -517,6 +537,7 @@ static struct State {
 	NiAVObject* body    = nullptr;  // Bip01: whole skeleton, turned back during free look
 	NiAVObject* neck    = nullptr;  // Bip01 Neck1 and Bip01 Head: look toward the camera
 	NiAVObject* head    = nullptr;
+	bool        ragdoll = false;    // dead/knocked down: hands off the skeleton (PlayerRagdollReason)
 	bool        freeLook = false;   // weapon holstered, standing still: body stays put
 	bool        torsoLag = false;   // weapon holstered, moving: whole body trails behind turns
 	bool        holsteredMoving = false;  // weapon holstered, moving (free look's only blocker)
@@ -904,6 +925,31 @@ static void UpdateAngle()
 	g.lastQpc = li.QuadPart;
 	if (dt > 0.25) dt = 0.25;
 
+	// Ragdoll: drop every turn so all Apply* functions leave the bones alone, and start fresh
+	// (no carried-over heading change) once the player is back on their feet.
+	const char* ragdoll = PlayerRagdollReason();
+	if (ragdoll || g.ragdoll) {
+		const bool on = ragdoll != nullptr;
+		if (g_cfg.debug && on != g.ragdoll) {
+			if (on) Log("ragdoll (%s): skeleton left alone", ragdoll);
+			else Log("ragdoll over");
+		}
+		g.ragdoll = on;
+		if (on) {
+			g.diagonal = g.diagonalVel = g.twist = g.angle = g.applied = 0.0f;
+			g.bodyYaw = g.bodyDiag = g.bodyDiagVel = 0.0f;
+			g.headYaw = g.headPitch = g.lean = g.turnRate = 0.0f;
+			g.catchingUp = false;
+			g.catchVel = 0.0f;
+			g.stillTime = 0.0;
+			g.freeLook = g.torsoLag = g.holsteredMoving = false;
+			g.freeLookBlocker = "";
+			g.haveHeading = false;
+			if (g.footIKPaused) UpdateFootIK();  // give the game its foot IK setting back
+			return;
+		}
+	}
+
 	uint32_t flags = PlayerMoveFlags();
 	if (g.strafeKeys && (flags & kMove_Direction) == kMove_Forward)
 		flags = (flags & ~kMove_Direction) | g.strafeKeys;  // the real keys (see Hook_SetMovementFlags)
@@ -1121,7 +1167,7 @@ static void SmoothMovement(NiPoint3& d)
 {
 	const MoveConfig& mc = g_cfg.move;
 	const float dt = *(float*)addr::kFrameDelta;
-	if (!(dt > 0.0f && dt < 0.25f)) {  // paused or after a hitch/load: start fresh
+	if (!(dt > 0.0f && dt < 0.25f) || g.ragdoll) {  // paused, hitch/load or ragdoll: start fresh
 		mv = MoveSmooth();
 		return;
 	}
@@ -1172,6 +1218,12 @@ static void __fastcall Hook_SetMovementFlags(void* mover, void* /*edx*/, uint32_
 	// degrees, back to forward below 100, so straight sideways is always forward and hovering
 	// doesn't flicker), and the legs/body are turned by the exact angle (TargetAngle). Keyboard
 	// (0x40 set) keeps its 8 directions.
+	if (PlayerRagdollReason()) {  // dead/knocked down: the game's own flags, untouched
+		g.analog = false;
+		g.strafeKeys = 0;
+		g_origSetMovementFlags(mover, flags);
+		return;
+	}
 	const uint32_t dirIn = flags & kMove_Direction;
 	const bool wasAnalog = g.analog;
 	g.analog = false;
@@ -1422,7 +1474,8 @@ static void __fastcall Hook_CameraUpdate(NiAVObject* node, void* /*edx*/, void* 
 	if (dt > 0.25) { dt = 0.25; cam.init = false; }  // after a pause/load: start fresh
 
 	if (g_cfg.cam.shoulderSwap) UpdateShoulder(dt);
-	if (node && InThirdPerson()) SmoothCamera(node, dt);
+	// Death/knockdown camera stays vanilla (it follows the ragdoll).
+	if (node && InThirdPerson() && !PlayerRagdollReason()) SmoothCamera(node, dt);
 	else cam.init = false;
 	((NiAVObjectUpdate_t)addr::kNiAVObjectUpdate)(node, updateData);
 }
@@ -1544,6 +1597,12 @@ __declspec(dllexport) bool FOSEPlugin_Load(const FOSEInterface* fose)
 		                  memcmp((const void*)addr::kGetKnockedUse, knock, sizeof(knock)) == 0;
 		if (!g_stateChecksOk && g_cfg.look.enabled)
 			Log("WARNING: game state functions do not match; free look disabled");
+
+		// cmp byte [esp+4],0 ; mov eax,[ecx+FC]  (Actor::IsDead reading the life state)
+		const uint8_t dead[] = { 0x80, 0x7C, 0x24, 0x04, 0x00, 0x8B, 0x81, 0xFC, 0x00, 0x00, 0x00 };
+		g_lifeStateOk = memcmp((const void*)addr::kIsDead, dead, sizeof(dead)) == 0;
+		if (!g_lifeStateOk)
+			Log("WARNING: Actor::IsDead does not match; STRIDE cannot tell when the player dies");
 	}
 
 	if (g_cfg.cam.enabled) {
