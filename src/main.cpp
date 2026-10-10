@@ -87,10 +87,12 @@ namespace addr {
 	constexpr uintptr_t kSettingShoulderX   = 0x00F5EAFC;  // fOverShoulderPosX (40)
 	constexpr uintptr_t kSettingAimPointX   = 0x00F5EB44;  // fOverShoulderOffsetPointX (98.4)
 	constexpr uintptr_t kSetMovementFlags   = 0x007E8F70;
-	// Crosshair. Actor::GetWeaponStat(type) (0x701C60, thiscall, ret 4): type 2 = gun spread
-	// multiplier (condition, skill, crippled limbs, iron sights, crouch/walk/run, then the
-	// "Calculate Gun Spread" perk entry). The cone is (weapon.spread * mult + weapon.minSpread)
-	// degrees, as at 0x4BE71D. Weapon = process vfunc +0x148 -> entry, entry+8 -> TESObjectWEAP.
+	// Crosshair. Actor::GetWeaponStat(type) (0x701C60, thiscall, ret 4): type 1 = weapon condition
+	// spread factor (fWeaponConditionSpread1..10), type 2 = gun wobble multiplier (condition, skill,
+	// crippled limbs, iron sights, crouch/walk/run, "Calculate Gun Spread" perks). The fire function
+	// (0x4BE1A0) gives each player shot a random offset within (weapon.spread * type 1 +
+	// weapon.minSpread) degrees (0x4BE6FF); type 2 only reaches the player's shots through the gun
+	// wobble (0x778A90, smoothed at 0xF6EA18). Weapon = process vfunc +0x148 -> entry+8 -> WEAP.
 	constexpr uintptr_t kGetWeaponStat      = 0x00701C60;
 	constexpr uintptr_t kIsMenuMode         = 0x00619160;  // bool __cdecl ()
 	constexpr uintptr_t kHUDMainMenu        = 0x010762B4;  // HUDMainMenu*; +0x12C crosshair tile, +0x18C mode mask (0x40 = crosshair)
@@ -99,6 +101,7 @@ namespace addr {
 	constexpr uintptr_t kTileGetString      = 0x00BECF60;  // const char* Tile::GetString(id), thiscall
 	// HUD mode change (0x64DE10): its call setting the crosshair's visibility (Tile::SetFloat)
 	constexpr uintptr_t kCallHudCrosshairVisible = 0x0064E3BD;
+	constexpr uintptr_t kSettingNonAttackWobble = 0x00F60530;  // fNonAttackGunWobbleMult (value at +4)
 	constexpr uintptr_t kSettingHUDColor    = 0x01075B74;  // uHUDColor:Interface (RGBA, R in the high byte)
 	constexpr uintptr_t kCameraRoot         = 0x0107A224;  // scene camera root; +0xAC = NiCamera
 	constexpr uintptr_t kSlotSetMovementFlags = 0x0C;
@@ -245,6 +248,7 @@ struct CrosshairConfig {
 	float size          = 1.0f;     // style 0: 1 = the game's own crosshair size
 	float dotSize       = 3.0f;     // style 0: centre dot, pixels at 1080p (0 = none)
 	float scale         = 1.0f;     // gap = spread cone * scale (calibration)
+	float wobbleDeg     = 8.0f;     // degrees the gun sways at full wobble (measured: ~8)
 	float minGap        = 3.0f;     // pixels at 1080p
 	float lineLength    = 9.0f;     // pixels at 1080p
 	float thickness     = 2.0f;     // pixels at 1080p
@@ -369,6 +373,7 @@ static void LoadConfig()
 	x.size       = IniFloat(path, "Crosshair", "fSize", x.size);
 	x.dotSize    = IniFloat(path, "Crosshair", "fDotSize", x.dotSize);
 	x.scale      = IniFloat(path, "Crosshair", "fSpreadScale", x.scale);
+	x.wobbleDeg  = IniFloat(path, "Crosshair", "fWobbleDegrees", x.wobbleDeg);
 	x.minGap     = IniFloat(path, "Crosshair", "fMinGap", x.minGap);
 	x.lineLength = IniFloat(path, "Crosshair", "fLineLength", x.lineLength);
 	x.thickness  = IniFloat(path, "Crosshair", "fThickness", x.thickness);
@@ -381,6 +386,7 @@ static void LoadConfig()
 	x.outline    = b("Crosshair", "bOutline", x.outline);
 	x.hideScoped = b("Crosshair", "bHideWhenScoped", x.hideScoped);
 	clampf(x.scale, 0.1f, 10.0f);
+	clampf(x.wobbleDeg, 0.0f, 45.0f);
 	clampf(x.size, 0.1f, 10.0f);
 	clampf(x.dotSize, 0.0f, 50.0f);
 	clampf(x.minGap, 0.0f, 100.0f);
@@ -388,7 +394,8 @@ static void LoadConfig()
 	clampf(x.thickness, 1.0f, 20.0f);
 	clampf(x.smoothTime, 0.0f, 1.0f);
 	clampf(x.opacity, 0.0f, 1.0f);
-	Log("config: Crosshair: iStyle=%d fSize=%.2f fDotSize=%.1f", x.style, x.size, x.dotSize);
+	Log("config: Crosshair: iStyle=%d fSize=%.2f fDotSize=%.1f fWobbleDegrees=%.1f", x.style, x.size, x.dotSize,
+	    x.wobbleDeg);
 	Log("config: Crosshair: bEnabled=%d fSpreadScale=%.2f fMinGap=%.1f fLineLength=%.1f fThickness=%.1f "
 	    "fSmoothMs=%.0f bUseHUDColor=%d rgb=%d,%d,%d fOpacity=%.2f bOutline=%d bHideWhenScoped=%d",
 	    x.enabled, x.scale, x.minGap, x.lineLength, x.thickness, x.smoothTime * 1000.0f, x.hudColor,
@@ -1627,7 +1634,17 @@ static void SetVanillaCrosshair(bool hide)
 	xh.vanillaHidden = hide;
 }
 
-// Works out whether to draw and the target gap in pixels.
+static float NonAttackWobbleMult()
+{
+	const GameSettingF* g = (const GameSettingF*)addr::kSettingNonAttackWobble;
+	static int ok = -1;  // checked once: the setting object is where expected
+	if (ok < 0) {
+		ok = !IsBadReadPtr(g->name, 24) && memcmp(g->name, "fNonAttackGunWobbleMult", 24) == 0;
+		Log("crosshair: fNonAttackGunWobbleMult %s %.3f", ok ? "=" : "NOT FOUND, using", ok ? g->value : 0.5f);
+	}
+	return ok ? g->value : 0.5f;
+}
+
 static const char* CrosshairHideReason(WeapData** wOut)
 {
 	if (!Player() || !PlayerRoot()) return "no player";
@@ -1639,6 +1656,7 @@ static const char* CrosshairHideReason(WeapData** wOut)
 	return nullptr;
 }
 
+// Works out whether to draw and the target gap in pixels.
 static bool CrosshairTarget(float width, float* gapOut)
 {
 	WeapData* w = nullptr;
@@ -1655,8 +1673,15 @@ static bool CrosshairTarget(float width, float* gapOut)
 		const float fov = 2.0f * std::atan(right) * kRadToDeg;
 		if (std::fabs(fov - w->sightFOV) < 3.0f) return false;  // looking through the scope
 	}
-	const float mult = ((float(__thiscall*)(void*, int))addr::kGetWeaponStat)(Player(), 2);
-	float deg = w->spread * mult + w->minSpread;
+	const float mult = ((float(__thiscall*)(void*, int))addr::kGetWeaponStat)(Player(), 1);
+	// The gun's sway: its wobble multiplier (skill, aiming, crouching, moving, condition, perks)
+	// at the between-shots level (fNonAttackGunWobbleMult, as 0x778CC6 applies it), times how far
+	// the gun sways at full wobble. The game's smoothed wobble (0xF6EA18) jumps to the full value
+	// for a moment after each shot, which doesn't widen where the bullets go, so it isn't used; nor
+	// is the barrel's position, which also follows the look up/down lag and reload animations.
+	const float wobbleMult = ((float(__thiscall*)(void*, int))addr::kGetWeaponStat)(Player(), 2);
+	const float sway = std::fmax(0.0f, wobbleMult * NonAttackWobbleMult()) * g_cfg.xh.wobbleDeg;
+	float deg = w->spread * mult + w->minSpread + sway;
 	if (!std::isfinite(deg) || deg < 0.0f) deg = 0.0f;
 	if (deg > 45.0f) deg = 45.0f;
 	*gapOut = std::tan(deg * kDegToRad) / right * (width * 0.5f) * g_cfg.xh.scale;
@@ -1665,8 +1690,9 @@ static bool CrosshairTarget(float width, float* gapOut)
 		const int64_t now = QpcNow();
 		if ((double)(now - lastLog) / g_qpcFreq > 0.5) {
 			lastLog = now;
-			Log("crosshair: spread %.2f x mult %.3f + min %.2f = %.2f deg, FOV %.1f, gap %.1f px",
-			    w->spread, mult, w->minSpread, deg, 2.0f * std::atan(right) * kRadToDeg, *gapOut);
+			Log("crosshair: spread %.2f x condition %.3f + min %.2f + sway %.2f (wobble mult %.3f) = %.2f deg, "
+			    "FOV %.1f, gap %.1f px", w->spread, mult, w->minSpread, sway, wobbleMult, deg,
+			    2.0f * std::atan(right) * kRadToDeg, *gapOut);
 		}
 	}
 	return true;
@@ -1981,7 +2007,7 @@ static struct XhImage {
 	IDirect3DTexture9* dot = nullptr;   // round dot with a dark soft rim
 } xhImg;
 
-constexpr float kDotCore = 0.6f;        // share of the dot texture's radius that is the bright core
+constexpr float kDotCore = 0.45f;       // share of the dot texture's radius that is the bright core
 
 static IDirect3DTexture9* MakeTexture(IDirect3DDevice9* dev, const std::vector<uint32_t>& px, int w, int h)
 {
@@ -2082,7 +2108,9 @@ static void LoadCrosshairImage(IDirect3DDevice9* dev)
 			const float r = std::hypot(x + 0.5f - ds * 0.5f, y + 0.5f - ds * 0.5f) / (ds * 0.5f);
 			const float edge = ds * 0.5f * kDotCore * 0.25f;  // core edge softness
 			const float core = std::fmax(0.0f, std::fmin(1.0f, (kDotCore - r) / kDotCore * edge + 0.5f));
-			const float rim = std::fmax(0.0f, std::fmin(1.0f, (1.0f - r) / (1.0f - kDotCore))) * 0.75f;
+			// rim fades out along a smoothstep curve: no hard outer edge, like the crosshair's glow
+			const float sr = std::fmax(0.0f, std::fmin(1.0f, (1.0f - r) / (1.0f - kDotCore)));
+			const float rim = sr * sr * (3.0f - 2.0f * sr) * 0.75f;
 			const float a = core + rim * (1.0f - core);
 			const float lum = a > 0.0f ? core / a : 0.0f;  // white core over a dark rim
 			const uint32_t c = (uint32_t)(40.0f + lum * 215.0f + 0.5f);
