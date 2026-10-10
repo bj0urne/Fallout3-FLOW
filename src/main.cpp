@@ -32,6 +32,7 @@
 #include <cstdio>
 #include <cstdarg>
 #include <cstring>
+#include <vector>
 
 #define PLUGIN_NAME        "STRIDE"
 #define PLUGIN_VERSION     1
@@ -92,8 +93,12 @@ namespace addr {
 	// degrees, as at 0x4BE71D. Weapon = process vfunc +0x148 -> entry, entry+8 -> TESObjectWEAP.
 	constexpr uintptr_t kGetWeaponStat      = 0x00701C60;
 	constexpr uintptr_t kIsMenuMode         = 0x00619160;  // bool __cdecl ()
-	constexpr uintptr_t kHUDMainMenu        = 0x010762B4;  // HUDMainMenu*; +0x190 element mask, 0x40 = crosshair
-	constexpr uintptr_t kSettingCrosshair   = 0x01075AE8;  // bCrossHair:GamePlay (value byte at +4)
+	constexpr uintptr_t kHUDMainMenu        = 0x010762B4;  // HUDMainMenu*; +0x12C crosshair tile, +0x18C mode mask (0x40 = crosshair)
+	constexpr uintptr_t kTileGetFloat       = 0x00BECF40;  // float Tile::GetValue(id), thiscall
+	constexpr uintptr_t kTileSetFloat       = 0x00BEE190;  // Tile::SetFloat(id, value, propagate), thiscall
+	constexpr uintptr_t kTileGetString      = 0x00BECF60;  // const char* Tile::GetString(id), thiscall
+	// HUD mode change (0x64DE10): its call setting the crosshair's visibility (Tile::SetFloat)
+	constexpr uintptr_t kCallHudCrosshairVisible = 0x0064E3BD;
 	constexpr uintptr_t kSettingHUDColor    = 0x01075B74;  // uHUDColor:Interface (RGBA, R in the high byte)
 	constexpr uintptr_t kCameraRoot         = 0x0107A224;  // scene camera root; +0xAC = NiCamera
 	constexpr uintptr_t kSlotSetMovementFlags = 0x0C;
@@ -104,7 +109,7 @@ namespace addr {
 	constexpr uintptr_t kGetKnockedUse      = 0x00510F00;  // process vfunc +0x408
 	// Actor::IsDead (actor vfunc +0x22C, called by GetDead 0x50F840): reads the life state +0xFC.
 	constexpr uintptr_t kIsDead             = 0x0070C940;
-	constexpr uintptr_t kVanityCamera       = 0x0107BA5B;  // bool, hold-POV / idle vanity camera
+	constexpr uintptr_t kVanityCamera      = 0x0107BA5B;  // bool, hold-POV / idle vanity camera
 }
 
 namespace vslot {
@@ -185,6 +190,10 @@ static_assert(offsetof(NiNode, firstFree) == 0xA6, "firstFree");
 constexpr float kPi       = 3.14159265f;
 constexpr float kDegToRad = kPi / 180.0f;
 constexpr float kRadToDeg = 180.0f / kPi;
+constexpr uint32_t kTileVisible = 0xFA3;  // kTileValue_visible
+constexpr uint32_t kTileFilename = 0xFCC;
+constexpr uint32_t kTileSystemColor = 0xFF4;  // 1 = HUDMain (uHUDColor), 2 = HUDAlt (red)
+constexpr uint32_t kTileUser1 = 0x1005;
 
 struct TurnConfig {                 // angles in radians, times in seconds
 	bool  enabled       = true;
@@ -232,6 +241,9 @@ struct CameraConfig {               // times in seconds
 
 struct CrosshairConfig {
 	bool  enabled       = true;
+	int   style         = 0;        // 0 = the game's crosshair split in two, 1 = four lines
+	float size          = 1.0f;     // style 0: 1 = the game's own crosshair size
+	float dotSize       = 3.0f;     // style 0: centre dot, pixels at 1080p (0 = none)
 	float scale         = 1.0f;     // gap = spread cone * scale (calibration)
 	float minGap        = 3.0f;     // pixels at 1080p
 	float lineLength    = 9.0f;     // pixels at 1080p
@@ -353,6 +365,9 @@ static void LoadConfig()
 
 	CrosshairConfig& x = g_cfg.xh;
 	x.enabled    = b("Crosshair", "bEnabled", x.enabled);
+	x.style      = GetPrivateProfileIntA("Crosshair", "iStyle", x.style, path);
+	x.size       = IniFloat(path, "Crosshair", "fSize", x.size);
+	x.dotSize    = IniFloat(path, "Crosshair", "fDotSize", x.dotSize);
 	x.scale      = IniFloat(path, "Crosshair", "fSpreadScale", x.scale);
 	x.minGap     = IniFloat(path, "Crosshair", "fMinGap", x.minGap);
 	x.lineLength = IniFloat(path, "Crosshair", "fLineLength", x.lineLength);
@@ -366,11 +381,14 @@ static void LoadConfig()
 	x.outline    = b("Crosshair", "bOutline", x.outline);
 	x.hideScoped = b("Crosshair", "bHideWhenScoped", x.hideScoped);
 	clampf(x.scale, 0.1f, 10.0f);
+	clampf(x.size, 0.1f, 10.0f);
+	clampf(x.dotSize, 0.0f, 50.0f);
 	clampf(x.minGap, 0.0f, 100.0f);
 	clampf(x.lineLength, 1.0f, 100.0f);
 	clampf(x.thickness, 1.0f, 20.0f);
 	clampf(x.smoothTime, 0.0f, 1.0f);
 	clampf(x.opacity, 0.0f, 1.0f);
+	Log("config: Crosshair: iStyle=%d fSize=%.2f fDotSize=%.1f", x.style, x.size, x.dotSize);
 	Log("config: Crosshair: bEnabled=%d fSpreadScale=%.2f fMinGap=%.1f fLineLength=%.1f fThickness=%.1f "
 	    "fSmoothMs=%.0f bUseHUDColor=%d rgb=%d,%d,%d fOpacity=%.2f bOutline=%d bHideWhenScoped=%d",
 	    x.enabled, x.scale, x.minGap, x.lineLength, x.thickness, x.smoothTime * 1000.0f, x.hudColor,
@@ -1593,26 +1611,44 @@ static float CameraFrustumRight()
 	return plausible(f) ? f[1] : 0.0f;
 }
 
+// The vanilla crosshair is the HUD's crosshair tile (HUDMainMenu+0x12C). The game sets its
+// "visible" value only when the HUD mode changes (closing a menu etc.), from the mode's element
+// mask (+0x18C, bit 0x40) combined with the player's setting. While ours shows, the tile is kept
+// hidden every frame; afterwards it gets back the visibility the game itself last asked for.
 static void SetVanillaCrosshair(bool hide)
 {
 	uint8_t* hud = *(uint8_t**)addr::kHUDMainMenu;
-	if (!hud) return;
-	uint32_t& mask = *(uint32_t*)(hud + 0x190);
-	const bool userWants = *(bool*)(addr::kSettingCrosshair + 4);
-	const bool show = userWants && !hide;
-	if (show) mask |= 0x40;
-	else mask &= ~0x40u;
+	void* tile = hud ? *(void**)(hud + 0x12C) : nullptr;
+	if (!tile) return;
+	const float want = hide ? 0.0f : ((*(uint32_t*)(hud + 0x18C) & 0x40) ? 1.0f : 0.0f);
+	const float cur = ((float(__thiscall*)(void*, uint32_t))addr::kTileGetFloat)(tile, kTileVisible);
+	if (cur != want)
+		((void(__thiscall*)(void*, uint32_t, float, bool))addr::kTileSetFloat)(tile, kTileVisible, want, true);
 	xh.vanillaHidden = hide;
 }
 
 // Works out whether to draw and the target gap in pixels.
+static const char* CrosshairHideReason(WeapData** wOut)
+{
+	if (!Player() || !PlayerRoot()) return "no player";
+	if (!g_stateChecksOk) return "state checks failed";
+	if (((bool(__cdecl*)())addr::kIsMenuMode)()) return "menu mode";
+	if (!PlayerWeaponOut()) return "weapon not out";
+	*wOut = PlayerGun();
+	if (!*wOut) return "not a gun";
+	return nullptr;
+}
+
 static bool CrosshairTarget(float width, float* gapOut)
 {
-	if (!Player() || !PlayerRoot() || !g_stateChecksOk) return false;
-	if (((bool(__cdecl*)())addr::kIsMenuMode)()) return false;
-	if (!PlayerWeaponOut()) return false;
-	WeapData* w = PlayerGun();
-	if (!w) return false;
+	WeapData* w = nullptr;
+	const char* why = CrosshairHideReason(&w);
+	static const char* lastWhy = "start";
+	if (g_cfg.debug && why != lastWhy) {
+		Log("crosshair: %s", why ? why : "shown");
+		lastWhy = why;
+	}
+	if (why) return false;
 	float right = CameraFrustumRight();
 	if (right <= 0.0f) right = std::tan(37.5f * kDegToRad);
 	if (g_cfg.xh.hideScoped && (w->flags1 & 0x4) && w->sightFOV > 0.0f) {
@@ -1624,6 +1660,15 @@ static bool CrosshairTarget(float width, float* gapOut)
 	if (!std::isfinite(deg) || deg < 0.0f) deg = 0.0f;
 	if (deg > 45.0f) deg = 45.0f;
 	*gapOut = std::tan(deg * kDegToRad) / right * (width * 0.5f) * g_cfg.xh.scale;
+	if (g_cfg.debug) {
+		static int64_t lastLog;
+		const int64_t now = QpcNow();
+		if ((double)(now - lastLog) / g_qpcFreq > 0.5) {
+			lastLog = now;
+			Log("crosshair: spread %.2f x mult %.3f + min %.2f = %.2f deg, FOV %.1f, gap %.1f px",
+			    w->spread, mult, w->minSpread, deg, 2.0f * std::atan(right) * kRadToDeg, *gapOut);
+		}
+	}
 	return true;
 }
 
@@ -1634,6 +1679,474 @@ static void FillRect(IDirect3DDevice9* dev, float x0, float y0, float x1, float 
 	x0 -= 0.5f; y0 -= 0.5f; x1 -= 0.5f; y1 -= 0.5f;  // pixel centres
 	const XhVertex v[4] = { { x0, y0, 0, 1, c }, { x1, y0, 0, 1, c }, { x0, y1, 0, 1, c }, { x1, y1, 0, 1, c } };
 	dev->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, v, sizeof(XhVertex));
+}
+
+// ---------------------------------------------------------------------------------------------
+// The game's own crosshair image (style 0), read from the interface texture atlas: loose files
+// first (so UI mods' crosshairs are used), then Fallout - Textures.bsa.
+
+// Minimal zlib inflate (RFC 1950/1951), after zlib's puff.c.
+namespace inflate {
+struct State {
+	const uint8_t* src; size_t len, pos = 0;
+	uint32_t buf = 0; int cnt = 0;
+	std::vector<uint8_t>* out;
+	bool err = false;
+};
+struct Huff { uint16_t count[16]; uint16_t symbol[288]; };
+
+static int Bits(State& s, int n)
+{
+	while (s.cnt < n) {
+		if (s.pos >= s.len) { s.err = true; return 0; }
+		s.buf |= (uint32_t)s.src[s.pos++] << s.cnt;
+		s.cnt += 8;
+	}
+	const int v = (int)(s.buf & ((1u << n) - 1));
+	s.buf >>= n;
+	s.cnt -= n;
+	return v;
+}
+
+static void Build(Huff& h, const uint8_t* lens, int n)
+{
+	memset(h.count, 0, sizeof(h.count));
+	for (int i = 0; i < n; ++i) h.count[lens[i]]++;
+	h.count[0] = 0;
+	uint16_t offs[16] = {};
+	for (int i = 1; i < 15; ++i) offs[i + 1] = offs[i] + h.count[i];
+	for (int i = 0; i < n; ++i)
+		if (lens[i]) h.symbol[offs[lens[i]]++] = (uint16_t)i;
+}
+
+static int Decode(State& s, const Huff& h)
+{
+	int code = 0, first = 0, index = 0;
+	for (int len = 1; len < 16; ++len) {
+		code |= Bits(s, 1);
+		const int count = h.count[len];
+		if (code - count < first) return h.symbol[index + (code - first)];
+		index += count;
+		first += count;
+		first <<= 1;
+		code <<= 1;
+		if (s.err) break;
+	}
+	s.err = true;
+	return 0;
+}
+
+static void Codes(State& s, const Huff& lit, const Huff& dist)
+{
+	static const uint16_t lbase[29] = { 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51,
+	                                    59, 67, 83, 99, 115, 131, 163, 195, 227, 258 };
+	static const uint8_t lext[29] = { 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4,
+	                                  5, 5, 5, 5, 0 };
+	static const uint16_t dbase[30] = { 1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385,
+	                                    513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577 };
+	static const uint8_t dext[30] = { 0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10,
+	                                  10, 11, 11, 12, 12, 13, 13 };
+	std::vector<uint8_t>& out = *s.out;
+	while (!s.err) {
+		int sym = Decode(s, lit);
+		if (sym < 256) { out.push_back((uint8_t)sym); continue; }
+		if (sym == 256) return;
+		sym -= 257;
+		if (sym >= 29) { s.err = true; return; }
+		const int len = lbase[sym] + Bits(s, lext[sym]);
+		const int dsym = Decode(s, dist);
+		if (dsym >= 30) { s.err = true; return; }
+		const size_t d = (size_t)dbase[dsym] + Bits(s, dext[dsym]);
+		if (d > out.size()) { s.err = true; return; }
+		for (int i = 0; i < len; ++i) out.push_back(out[out.size() - d]);
+	}
+}
+
+// zlib stream -> out; false on malformed data.
+static bool Zlib(const uint8_t* src, size_t len, std::vector<uint8_t>& out)
+{
+	if (len < 2 || (src[0] & 0x0F) != 8 || (src[1] & 0x20)) return false;
+	State s;
+	s.src = src; s.len = len; s.pos = 2; s.out = &out;
+	int last;
+	do {
+		last = Bits(s, 1);
+		const int type = Bits(s, 2);
+		if (type == 0) {
+			s.buf = 0; s.cnt = 0;
+			if (s.pos + 4 > s.len) return false;
+			const unsigned n = s.src[s.pos] | s.src[s.pos + 1] << 8;
+			s.pos += 4;
+			if (s.pos + n > s.len) return false;
+			out.insert(out.end(), s.src + s.pos, s.src + s.pos + n);
+			s.pos += n;
+		} else if (type == 1) {
+			static Huff lit, dist;
+			static bool built;
+			if (!built) {
+				uint8_t l[288];
+				for (int i = 0; i < 288; ++i) l[i] = i < 144 ? 8 : i < 256 ? 9 : i < 280 ? 7 : 8;
+				Build(lit, l, 288);
+				for (int i = 0; i < 30; ++i) l[i] = 5;
+				Build(dist, l, 30);
+				built = true;
+			}
+			Codes(s, lit, dist);
+		} else if (type == 2) {
+			static const uint8_t order[19] = { 16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15 };
+			const int nlen = Bits(s, 5) + 257, ndist = Bits(s, 5) + 1, ncode = Bits(s, 4) + 4;
+			if (nlen > 286 || ndist > 30) return false;
+			uint8_t lens[320] = {};
+			for (int i = 0; i < ncode; ++i) lens[order[i]] = (uint8_t)Bits(s, 3);
+			Huff lc, lit, dist;
+			Build(lc, lens, 19);
+			int i = 0;
+			while (i < nlen + ndist && !s.err) {
+				int sym = Decode(s, lc);
+				if (sym < 16) { lens[i++] = (uint8_t)sym; continue; }
+				int val = 0, rep;
+				if (sym == 16) {
+					if (i == 0) return false;
+					val = lens[i - 1];
+					rep = 3 + Bits(s, 2);
+				} else if (sym == 17) rep = 3 + Bits(s, 3);
+				else rep = 11 + Bits(s, 7);
+				if (i + rep > nlen + ndist) return false;
+				while (rep--) lens[i++] = (uint8_t)val;
+			}
+			Build(lit, lens, nlen);
+			Build(dist, lens + nlen, ndist);
+			Codes(s, lit, dist);
+		} else {
+			return false;
+		}
+		if (s.err) return false;
+	} while (!last);
+	return true;
+}
+}  // namespace inflate
+
+static bool ReadWholeFile(const char* path, std::vector<uint8_t>& out)
+{
+	FILE* f = fopen(path, "rb");
+	if (!f) return false;
+	fseek(f, 0, SEEK_END);
+	const long n = ftell(f);
+	fseek(f, 0, SEEK_SET);
+	out.resize(n > 0 ? (size_t)n : 0);
+	const bool ok = n > 0 && fread(out.data(), 1, (size_t)n, f) == (size_t)n;
+	fclose(f);
+	return ok;
+}
+
+// A file from a version 104 BSA (Fallout 3). rel = "textures\\interface\\x.dds" (any case).
+static bool ReadFromBsa(const char* bsaPath, const char* rel, std::vector<uint8_t>& out)
+{
+	FILE* f = fopen(bsaPath, "rb");
+	if (!f) return false;
+	bool ok = false;
+	uint32_t h[9];
+	if (fread(h, 4, 9, f) == 9 && h[0] == 0x00415342 && h[1] == 104 && (h[3] & 3) == 3) {
+		const uint32_t aflags = h[3], nfold = h[4], nfile = h[5], lfold = h[6], lfile = h[7];
+		std::vector<uint8_t> recs((size_t)nfold * 16 + nfold + lfold + (size_t)nfile * 16 + lfile);
+		fseek(f, (long)h[2], SEEK_SET);
+		if (fread(recs.data(), 1, recs.size(), f) == recs.size()) {
+			char dir[MAX_PATH];
+			const char* slash = strrchr(rel, '\\');
+			const size_t dlen = slash ? (size_t)(slash - rel) : 0;
+			memcpy(dir, rel, dlen);
+			dir[dlen] = 0;
+			const char* name = slash ? slash + 1 : rel;
+			// file records (per folder: name bstring + count records), then the file name block
+			const uint8_t* p = recs.data() + (size_t)nfold * 16;
+			const char* nm = (const char*)recs.data() + recs.size() - lfile;
+			for (uint32_t fi = 0; fi < nfold && !ok; ++fi) {
+				const uint32_t count = *(const uint32_t*)(recs.data() + fi * 16 + 8);
+				const uint8_t nlen = *p++;
+				const bool dirMatch = _stricmp((const char*)p, dir) == 0;
+				p += nlen;
+				for (uint32_t i = 0; i < count; ++i, p += 16) {
+					const bool hit = dirMatch && _stricmp(nm, name) == 0;
+					nm += strlen(nm) + 1;
+					if (!hit) continue;
+					uint32_t size = *(const uint32_t*)(p + 8);
+					const uint32_t off = *(const uint32_t*)(p + 12);
+					const bool comp = ((aflags & 4) != 0) != ((size & 0x40000000) != 0);
+					size &= 0x3FFFFFFF;
+					std::vector<uint8_t> raw(size);
+					fseek(f, (long)off, SEEK_SET);
+					if (fread(raw.data(), 1, size, f) != size) break;
+					size_t at = 0;
+					if (aflags & 0x100) at = 1 + (size_t)raw[0];  // embedded file name
+					if (comp) {
+						if (at + 4 > raw.size()) break;
+						const uint32_t orig = *(const uint32_t*)(raw.data() + at);
+						out.clear();
+						out.reserve(orig);
+						ok = inflate::Zlib(raw.data() + at + 4, raw.size() - at - 4, out) && out.size() == orig;
+					} else {
+						out.assign(raw.begin() + at, raw.end());
+						ok = true;
+					}
+					break;
+				}
+			}
+		}
+	}
+	fclose(f);
+	return ok;
+}
+
+static bool ReadGameFile(const char* rel, std::vector<uint8_t>& out)
+{
+	char data[MAX_PATH], path[MAX_PATH];
+	GetModuleFileNameA(nullptr, data, sizeof(data));
+	char* slash = strrchr(data, '\\');
+	if (slash) slash[1] = 0;
+	snprintf(path, sizeof(path), "%sData\\%s", data, rel);
+	if (ReadWholeFile(path, out)) return true;
+	snprintf(path, sizeof(path), "%sData\\Fallout - Textures.bsa", data);
+	return ReadFromBsa(path, rel, out);
+}
+
+// Decodes a rectangle of a DDS (DXT1/3/5 or 32-bit ARGB) into A8R8G8B8 pixels.
+static bool DecodeDds(const std::vector<uint8_t>& dds, int x0, int y0, int w, int h, std::vector<uint32_t>& px)
+{
+	if (dds.size() < 128 || memcmp(dds.data(), "DDS ", 4) != 0) return false;
+	const int H = *(const int*)(dds.data() + 12), W = *(const int*)(dds.data() + 16);
+	const uint32_t pfFlags = *(const uint32_t*)(dds.data() + 80), fourcc = *(const uint32_t*)(dds.data() + 84);
+	if (x0 < 0 || y0 < 0 || w <= 0 || h <= 0 || x0 + w > W || y0 + h > H) return false;
+	const uint8_t* d = dds.data() + 128;
+	px.assign((size_t)w * h, 0);
+	if (pfFlags & 4) {  // compressed
+		const int kind = fourcc == MAKEFOURCC('D', 'X', 'T', '1') ? 1 : fourcc == MAKEFOURCC('D', 'X', 'T', '3') ? 3 :
+		                 fourcc == MAKEFOURCC('D', 'X', 'T', '5') ? 5 : 0;
+		if (!kind) return false;
+		const int bsize = kind == 1 ? 8 : 16, bw = (W + 3) / 4;
+		if (dds.size() < 128 + (size_t)bw * ((H + 3) / 4) * bsize) return false;
+		auto ch = [](uint32_t v, int k) -> uint32_t {  // 565 channel k (0 = r) expanded to 8 bits
+			return k == 0 ? (v >> 11 & 31) * 255 / 31 : k == 1 ? (v >> 5 & 63) * 255 / 63 : (v & 31) * 255 / 31;
+		};
+		for (int y = y0; y < y0 + h; ++y)
+			for (int x = x0; x < x0 + w; ++x) {
+				const uint8_t* b = d + ((size_t)(y / 4) * bw + x / 4) * bsize;
+				const int i = (y & 3) * 4 + (x & 3);
+				uint32_t a = 255;
+				if (kind == 3) {
+					a = ((b[i / 2] >> ((i & 1) * 4)) & 15) * 17;
+				} else if (kind == 5) {
+					const uint32_t a0 = b[0], a1 = b[1];
+					uint64_t bits = 0;
+					for (int k = 0; k < 6; ++k) bits |= (uint64_t)b[2 + k] << (8 * k);
+					const uint32_t ai = (uint32_t)(bits >> (3 * i)) & 7;
+					if (ai == 0) a = a0;
+					else if (ai == 1) a = a1;
+					else if (a0 > a1) a = ((8 - ai) * a0 + (ai - 1) * a1) / 7;
+					else a = ai == 6 ? 0 : ai == 7 ? 255 : ((6 - ai) * a0 + (ai - 1) * a1) / 5;
+				}
+				const uint8_t* c = b + (kind == 1 ? 0 : 8);
+				const uint32_t c0 = c[0] | c[1] << 8, c1 = c[2] | c[3] << 8;
+				const uint32_t ci = (c[4 + (i >> 2)] >> ((i & 3) * 2)) & 3;
+				uint32_t rgb = 0;
+				for (int k = 0; k < 3; ++k) {
+					const uint32_t e0 = ch(c0, k), e1 = ch(c1, k);
+					uint32_t v;
+					if (ci == 0) v = e0;
+					else if (ci == 1) v = e1;
+					else if (kind != 1 || c0 > c1) v = ci == 2 ? (2 * e0 + e1) / 3 : (e0 + 2 * e1) / 3;
+					else if (ci == 2) v = (e0 + e1) / 2;
+					else { v = 0; a = 0; }
+					rgb = rgb << 8 | v;
+				}
+				px[(size_t)(y - y0) * w + (x - x0)] = a << 24 | rgb;
+			}
+		return true;
+	}
+	if (*(const uint32_t*)(dds.data() + 88) != 32 || dds.size() < 128 + (size_t)W * H * 4) return false;
+	for (int y = 0; y < h; ++y)
+		memcpy(&px[(size_t)y * w], d + ((size_t)(y0 + y) * W + x0) * 4, (size_t)w * 4);
+	return true;
+}
+
+struct XhTex {
+	IDirect3DTexture9* tex = nullptr;
+	int w = 0, h = 0;
+	float centreY = 0.0f;               // texels: vertical centre of the drawn shape
+	float tip = 0.0f;                   // texels: from the middle to the inner tip of each half
+};
+
+static struct XhImage {
+	bool tried = false;
+	XhTex img[2];                       // the game's crosshair: [0] normal, [1] filled (aiming at someone)
+	IDirect3DTexture9* dot = nullptr;   // round dot with a dark soft rim
+} xhImg;
+
+constexpr float kDotCore = 0.6f;        // share of the dot texture's radius that is the bright core
+
+static IDirect3DTexture9* MakeTexture(IDirect3DDevice9* dev, const std::vector<uint32_t>& px, int w, int h)
+{
+	IDirect3DTexture9* t = nullptr;
+	if (FAILED(dev->CreateTexture(w, h, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &t, nullptr)) || !t) return nullptr;
+	D3DLOCKED_RECT lr;
+	if (FAILED(t->LockRect(0, &lr, nullptr, 0))) { t->Release(); return nullptr; }
+	for (int y = 0; y < h; ++y) memcpy((uint8_t*)lr.pBits + (size_t)y * lr.Pitch, &px[(size_t)y * w], (size_t)w * 4);
+	t->UnlockRect(0);
+	return t;
+}
+
+// Loads one image of the interface atlas (as listed in interfaceshared.tai).
+static bool LoadAtlasImage(IDirect3DDevice9* dev, const std::vector<uint8_t>& taiFile, const char* want, XhTex& out)
+{
+	std::vector<char> tai(taiFile.begin(), taiFile.end());
+	tai.push_back(0);
+	char atlas[MAX_PATH] = "";
+	float u = 0, v = 0, uw = 0, vh = 0;
+	for (char* line = tai.data(); line && *line;) {
+		char* next = strpbrk(line, "\r\n");
+		if (next) *next++ = 0;
+		while (next && (*next == '\r' || *next == '\n')) ++next;
+		char name[MAX_PATH], file[MAX_PATH], kind[8];
+		int idx;
+		float d;
+		if (sscanf(line, "%259s %259[^,], %d, %7[^,], %f, %f, %f, %f, %f", name, file, &idx, kind, &u, &v, &d, &uw,
+		           &vh) == 9 && _stricmp(name, want) == 0) {
+			snprintf(atlas, sizeof(atlas), "%s", file);
+			break;
+		}
+		line = next;
+	}
+	if (!*atlas) {
+		Log("WARNING: crosshair: %s not in interfaceshared.tai", want);
+		return false;
+	}
+	char rel[MAX_PATH];
+	snprintf(rel, sizeof(rel), "textures\\interface\\%s", atlas);
+	std::vector<uint8_t> dds;
+	if (!ReadGameFile(rel, dds) || dds.size() < 128) {
+		Log("WARNING: crosshair: %s not found", rel);
+		return false;
+	}
+	const int H = *(const int*)(dds.data() + 12), W = *(const int*)(dds.data() + 16);
+	// atlas coordinates are inset by half a texel
+	const int x0 = (int)std::lround(u * W - 0.5f), y0 = (int)std::lround(v * H - 0.5f);
+	const int x1 = (int)std::lround((u + uw) * W + 0.5f), y1 = (int)std::lround((v + vh) * H + 0.5f);
+	std::vector<uint32_t> px;
+	if (!DecodeDds(dds, x0, y0, x1 - x0, y1 - y0, px)) {
+		Log("WARNING: crosshair: could not decode %s", rel);
+		return false;
+	}
+	const int w = x1 - x0, h = y1 - y0, mid = w / 2;
+	int top = h, bottom = -1, leftTip = -1, rightTip = w;
+	for (int y = 0; y < h; ++y)
+		for (int x = 0; x < w; ++x)
+			if ((px[(size_t)y * w + x] >> 24) > 40) {
+				if (y < top) top = y;
+				if (y > bottom) bottom = y;
+				if (x < mid && x > leftTip) leftTip = x;
+				if (x >= mid && x < rightTip) rightTip = x;
+			}
+	if (bottom < 0) {
+		Log("WARNING: crosshair: %s is empty", want);
+		return false;
+	}
+	out.w = w;
+	out.h = h;
+	out.centreY = (top + bottom + 1) * 0.5f;
+	out.tip = std::fmin(leftTip >= 0 ? (float)(mid - (leftTip + 1)) : 0.0f,
+	                    rightTip < w ? (float)(rightTip - mid) : 0.0f);
+	out.tex = MakeTexture(dev, px, w, h);
+	Log("crosshair: %s %dx%d from %s (%d,%d), tips %.1f texels from the middle%s", want, w, h, rel, x0, y0, out.tip,
+	    out.tex ? "" : " - TEXTURE CREATION FAILED");
+	return out.tex != nullptr;
+}
+
+static void LoadCrosshairImage(IDirect3DDevice9* dev)
+{
+	xhImg.tried = true;
+	std::vector<uint8_t> tai;
+	if (!ReadGameFile("textures\\interface\\interfaceshared.tai", tai)) {
+		Log("WARNING: crosshair: interfaceshared.tai not found; using the four line crosshair");
+		return;
+	}
+	if (!LoadAtlasImage(dev, tai, "glow_crosshair.dds", xhImg.img[0])) {
+		Log("WARNING: crosshair: using the four line crosshair");
+		return;
+	}
+	LoadAtlasImage(dev, tai, "glow_crosshair_filled.dds", xhImg.img[1]);
+
+	// Dot: bright core, then a dark rim fading out (like the soft dark edge of the game's crosshair).
+	const int ds = 64;
+	std::vector<uint32_t> dot((size_t)ds * ds);
+	for (int y = 0; y < ds; ++y)
+		for (int x = 0; x < ds; ++x) {
+			const float r = std::hypot(x + 0.5f - ds * 0.5f, y + 0.5f - ds * 0.5f) / (ds * 0.5f);
+			const float edge = ds * 0.5f * kDotCore * 0.25f;  // core edge softness
+			const float core = std::fmax(0.0f, std::fmin(1.0f, (kDotCore - r) / kDotCore * edge + 0.5f));
+			const float rim = std::fmax(0.0f, std::fmin(1.0f, (1.0f - r) / (1.0f - kDotCore))) * 0.75f;
+			const float a = core + rim * (1.0f - core);
+			const float lum = a > 0.0f ? core / a : 0.0f;  // white core over a dark rim
+			const uint32_t c = (uint32_t)(40.0f + lum * 215.0f + 0.5f);
+			dot[(size_t)y * ds + x] = (uint32_t)(a * 255.0f + 0.5f) << 24 | c << 16 | c << 8 | c;
+		}
+	xhImg.dot = MakeTexture(dev, dot, ds, ds);
+}
+
+struct XhTexVertex { float x, y, z, rhw; D3DCOLOR c; float u, v; };
+
+static void TexRect(IDirect3DDevice9* dev, float x0, float y0, float x1, float y1, float u0, float u1, D3DCOLOR c)
+{
+	x0 -= 0.5f; y0 -= 0.5f; x1 -= 0.5f; y1 -= 0.5f;
+	const XhTexVertex v[4] = { { x0, y0, 0, 1, c, u0, 0 }, { x1, y0, 0, 1, c, u1, 0 },
+	                           { x0, y1, 0, 1, c, u0, 1 }, { x1, y1, 0, 1, c, u1, 1 } };
+	dev->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, v, sizeof(XhTexVertex));
+}
+
+// Style 0: the halves of the game's crosshair move apart so their tips sit on the spread cone.
+static void DrawSplitCrosshair(IDirect3DDevice9* dev, const XhTex& img, float W, float H, D3DCOLOR color)
+{
+	const CrosshairConfig& cc = g_cfg.xh;
+	const float s = cc.size * H / 960.0f;  // interface units (960 = screen height) -> pixels
+	const float cx = W * 0.5f, cy = H * 0.5f;
+	const float off = std::fmax(0.0f, xh.gap - img.tip * s);
+	const float half = img.w * 0.5f * s;
+	const float yt = cy - img.centreY * s, yb = yt + img.h * s;
+	dev->SetFVF(D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_TEX1);
+	dev->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_MODULATE);
+	dev->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+	dev->SetTextureStageState(0, D3DTSS_COLORARG2, D3DTA_DIFFUSE);
+	dev->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_MODULATE);
+	dev->SetTextureStageState(0, D3DTSS_ALPHAARG1, D3DTA_TEXTURE);
+	dev->SetTextureStageState(0, D3DTSS_ALPHAARG2, D3DTA_DIFFUSE);
+	dev->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_LINEAR);
+	dev->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR);
+	dev->SetSamplerState(0, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
+	dev->SetSamplerState(0, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
+	dev->SetSamplerState(0, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
+	dev->SetSamplerState(0, D3DSAMP_SRGBTEXTURE, FALSE);
+	dev->SetTexture(0, img.tex);
+	TexRect(dev, cx - off - half, yt, cx - off, yb, 0.0f, 0.5f, color);
+	TexRect(dev, cx + off, yt, cx + off + half, yb, 0.5f, 1.0f, color);
+	if (cc.dotSize > 0.0f && xhImg.dot) {
+		const float r = cc.dotSize * H / 1080.0f * 0.5f / kDotCore;  // fDotSize = the bright core
+		dev->SetTexture(0, xhImg.dot);
+		TexRect(dev, cx - r, cy - r, cx + r, cy + r, 0.0f, 1.0f, color);
+	}
+	dev->SetTexture(0, nullptr);
+}
+
+// What the game's own crosshair image currently shows: red (system colour 2, "HUDAlt") when
+// aiming at someone hostile, and the filled version (brackets) when aiming at an actor.
+static void VanillaCrosshairState(bool* hostile, bool* filled)
+{
+	*hostile = *filled = false;
+	uint8_t* hud = *(uint8_t**)addr::kHUDMainMenu;
+	void* img = hud ? *(void**)(hud + 0xF4) : nullptr;
+	if (!img) return;
+	*hostile = ((float(__thiscall*)(void*, uint32_t))addr::kTileGetFloat)(img, kTileSystemColor) == 2.0f;
+	auto str = [img](uint32_t id) { return ((const char*(__thiscall*)(void*, uint32_t))addr::kTileGetString)(img, id); };
+	const char* file = str(kTileFilename);
+	const char* user1 = str(kTileUser1);
+	*filled = file && user1 && *user1 && _stricmp(file, user1) == 0;
 }
 
 static void DrawCrosshair(IDirect3DDevice9* dev)
@@ -1651,14 +2164,19 @@ static void DrawCrosshair(IDirect3DDevice9* dev)
 
 	float target = 0.0f;
 	const bool show = CrosshairTarget(W, &target);
-	if (show != xh.vanillaHidden) SetVanillaCrosshair(show);
+	if (show || xh.vanillaHidden) SetVanillaCrosshair(show);
 	if (!show) {
 		xh.visible = false;
 		bb->Release();
 		return;
 	}
 	const float k = H / 1080.0f;  // resolution scale
-	const float minGap = cc.minGap * k;
+	if (cc.style == 0 && !xhImg.tried) LoadCrosshairImage(dev);
+	bool hostile, filled;
+	VanillaCrosshairState(&hostile, &filled);
+	const XhTex& img = xhImg.img[filled && xhImg.img[1].tex ? 1 : 0];
+	const bool split = cc.style == 0 && img.tex;
+	const float minGap = split ? 0.0f : cc.minGap * k;
 	if (target < minGap) target = minGap;
 	if (target > H * 0.4f) target = H * 0.4f;
 	if (!xh.visible) { xh.gap = target; xh.gapVel = 0.0f; }  // appear at the right size
@@ -1666,7 +2184,9 @@ static void DrawCrosshair(IDirect3DDevice9* dev)
 	xh.visible = true;
 
 	uint32_t rgb = (uint32_t)((cc.r & 255) << 16 | (cc.gr & 255) << 8 | (cc.b & 255));
-	if (cc.hudColor) {
+	if (hostile) {
+		rgb = 0xFF432A;  // HUDAlt, as the game's crosshair over enemies
+	} else if (cc.hudColor) {
 		const GameSettingF* s = (const GameSettingF*)addr::kSettingHUDColor;
 		if (!IsBadReadPtr(s->name, 20) && memcmp(s->name, "uHUDColor:Interface", 20) == 0) {
 			const uint32_t v = *(const uint32_t*)&s->value;  // R G B A, R in the high byte
@@ -1720,8 +2240,12 @@ static void DrawCrosshair(IDirect3DDevice9* dev)
 			FillRect(dev, cx - g - len - o, cy - h0 - o, cx - g + o, cy + h1 + o, c);  // left
 			FillRect(dev, cx + g - o, cy - h0 - o, cx + g + len + o, cy + h1 + o, c);  // right
 		};
-		if (cc.outline) lines(1.0f, shadow);
-		lines(0.0f, color);
+		if (split) {
+			DrawSplitCrosshair(dev, img, W, H, color);
+		} else {
+			if (cc.outline) lines(1.0f, shadow);
+			lines(0.0f, color);
+		}
 		dev->EndScene();
 	}
 
@@ -1731,16 +2255,55 @@ static void DrawCrosshair(IDirect3DDevice9* dev)
 	bb->Release();
 }
 
+// The HUD mode change (aiming, menus closing...) sets the vanilla crosshair visible again; while
+// ours shows, keep it hidden right there, before the HUD draws it for a frame.
+static void __fastcall Hook_HudCrosshairVisible(void* tile, void*, uint32_t id, float value, bool propagate)
+{
+	if (xh.visible && id == kTileVisible && value != 0.0f) {
+		value = 0.0f;
+		if (g_cfg.debug) {
+			static int n;
+			if (n++ < 5) Log("crosshair: kept the vanilla crosshair hidden on a HUD mode change");
+		}
+	}
+	((void(__thiscall*)(void*, uint32_t, float, bool))addr::kTileSetFloat)(tile, id, value, propagate);
+}
+
 typedef HRESULT(__stdcall* D3DPresent_t)(IDirect3DDevice9*, const RECT*, const RECT*, HWND, const RGNDATA*);
 typedef HRESULT(__stdcall* D3DReset_t)(IDirect3DDevice9*, D3DPRESENT_PARAMETERS*);
 static D3DPresent_t g_origPresent;
 static D3DReset_t   g_origReset;
 
+typedef HRESULT(__stdcall* SCPresent_t)(IDirect3DSwapChain9*, const RECT*, const RECT*, HWND, const RGNDATA*,
+                                         DWORD);
+typedef HRESULT(__stdcall* D3DCreateDevice_t)(IDirect3D9*, UINT, D3DDEVTYPE, HWND, DWORD,
+                                              D3DPRESENT_PARAMETERS*, IDirect3DDevice9**);
+static SCPresent_t       g_origSCPresent;
+static D3DCreateDevice_t g_origCreateDevice;
+static IDirect3DDevice9* g_gameDevice;
+static bool              g_inPresent;
+static int               g_presentLogs;
+
 static HRESULT __stdcall Hook_Present(IDirect3DDevice9* dev, const RECT* src, const RECT* dst, HWND wnd,
                                       const RGNDATA* dirty)
 {
+	if (g_cfg.debug && g_presentLogs < 1) { ++g_presentLogs; Log("crosshair: device Present called"); }
+	g_inPresent = true;
 	DrawCrosshair(dev);
-	return g_origPresent(dev, src, dst, wnd, dirty);
+	const HRESULT hr = g_origPresent(dev, src, dst, wnd, dirty);
+	g_inPresent = false;
+	return hr;
+}
+
+// Some renderers present through the swap chain instead of the device.
+static HRESULT __stdcall Hook_SCPresent(IDirect3DSwapChain9* sc, const RECT* src, const RECT* dst, HWND wnd,
+                                        const RGNDATA* dirty, DWORD flags)
+{
+	if (!g_inPresent && g_gameDevice) {
+		if (g_cfg.debug && g_presentLogs < 2) { g_presentLogs = 2; Log("crosshair: swap chain Present called"); }
+		DrawCrosshair(g_gameDevice);
+	}
+	return g_origSCPresent(sc, src, dst, wnd, dirty, flags);
 }
 
 static HRESULT __stdcall Hook_Reset(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS* pp)
@@ -1749,44 +2312,52 @@ static HRESULT __stdcall Hook_Reset(IDirect3DDevice9* dev, D3DPRESENT_PARAMETERS
 	return g_origReset(dev, pp);
 }
 
-// Direct3D isn't imported by the game (it is loaded at runtime), so a throwaway device is created
-// here to find the device class's Present/Reset, which the game's device shares.
+static bool PatchPtr(void** p, void* fn, void** orig)
+{
+	if (*p == fn) return true;  // already ours
+	DWORD old;
+	if (!VirtualProtect(p, sizeof(void*), PAGE_EXECUTE_READWRITE, &old)) return false;
+	*orig = *p;
+	*p = fn;
+	VirtualProtect(p, sizeof(void*), old, &old);
+	return true;
+}
+
+// Hooks the game's own device (its class depends on the creation flags, so it can't be found
+// with a probe device).
+static HRESULT __stdcall Hook_CreateDevice(IDirect3D9* d3d, UINT adapter, D3DDEVTYPE type, HWND wnd, DWORD flags,
+                                           D3DPRESENT_PARAMETERS* pp, IDirect3DDevice9** out)
+{
+	const HRESULT hr = g_origCreateDevice(d3d, adapter, type, wnd, flags, pp, out);
+	if (FAILED(hr) || !out || !*out) {
+		Log("crosshair: CreateDevice failed (%08X)", (unsigned)hr);
+		return hr;
+	}
+	IDirect3DDevice9* dev = *out;
+	g_gameDevice = dev;
+	void** vt = *(void***)dev;
+	const bool ok = PatchPtr(&vt[16], (void*)&Hook_Reset, (void**)&g_origReset) &&
+	                PatchPtr(&vt[17], (void*)&Hook_Present, (void**)&g_origPresent);
+	bool scOk = false;
+	IDirect3DSwapChain9* sc = nullptr;
+	if (SUCCEEDED(dev->GetSwapChain(0, &sc)) && sc) {
+		scOk = PatchPtr(&(*(void***)sc)[3], (void*)&Hook_SCPresent, (void**)&g_origSCPresent);
+		sc->Release();
+	}
+	Log("crosshair: game created its Direct3D device (flags %08X, vtable %p); hooked Present %s, swap chain %s",
+	    (unsigned)flags, (void*)vt, ok ? "yes" : "NO", scOk ? "yes" : "NO");
+	return hr;
+}
+
+// Direct3D isn't imported by the game (it is loaded at runtime): hook IDirect3D9::CreateDevice
+// (shared by every IDirect3D9 object) so the game's device can be hooked when it is created.
 static bool HookD3D9()
 {
-	WNDCLASSA wc = {};
-	wc.lpfnWndProc = DefWindowProcA;
-	wc.hInstance = GetModuleHandleA(nullptr);
-	wc.lpszClassName = "STRIDE_d3d9_probe";
-	RegisterClassA(&wc);
-	HWND hwnd = CreateWindowA(wc.lpszClassName, "", WS_OVERLAPPEDWINDOW, 0, 0, 16, 16, nullptr, nullptr,
-	                          wc.hInstance, nullptr);
-	bool ok = false;
-	IDirect3D9* d3d = hwnd ? Direct3DCreate9(D3D_SDK_VERSION) : nullptr;
-	if (d3d) {
-		D3DPRESENT_PARAMETERS pp = {};
-		pp.Windowed = TRUE;
-		pp.SwapEffect = D3DSWAPEFFECT_DISCARD;
-		pp.BackBufferFormat = D3DFMT_UNKNOWN;
-		pp.hDeviceWindow = hwnd;
-		IDirect3DDevice9* dev = nullptr;
-		if (SUCCEEDED(d3d->CreateDevice(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, hwnd,
-		                                D3DCREATE_SOFTWARE_VERTEXPROCESSING, &pp, &dev)) && dev) {
-			void** vt = *(void***)dev;
-			DWORD old;
-			if (VirtualProtect(&vt[16], 2 * sizeof(void*), PAGE_EXECUTE_READWRITE, &old)) {
-				g_origReset = (D3DReset_t)vt[16];
-				g_origPresent = (D3DPresent_t)vt[17];
-				vt[16] = (void*)&Hook_Reset;
-				vt[17] = (void*)&Hook_Present;
-				VirtualProtect(&vt[16], 2 * sizeof(void*), old, &old);
-				ok = true;
-			}
-			dev->Release();
-		}
-		d3d->Release();
-	}
-	if (hwnd) DestroyWindow(hwnd);
-	UnregisterClassA(wc.lpszClassName, wc.hInstance);
+	IDirect3D9* d3d = Direct3DCreate9(D3D_SDK_VERSION);
+	if (!d3d) return false;
+	void** vt = *(void***)d3d;
+	const bool ok = PatchPtr(&vt[16], (void*)&Hook_CreateDevice, (void**)&g_origCreateDevice);
+	d3d->Release();
 	return ok;
 }
 
@@ -1920,21 +2491,40 @@ __declspec(dllexport) bool FOSEPlugin_Load(const FOSEInterface* fose)
 		const uint8_t isMenu[] = { 0xA1, 0x24, 0x5B, 0x07, 0x01, 0x85, 0xC0 };
 		const uint8_t stat[] = { 0x83, 0xEC, 0x10, 0x56, 0x8B, 0xF1, 0x8B, 0x4E, 0x60, 0x85, 0xC9 };
 		const uint8_t statWeap[] = { 0x8B, 0x01, 0x8B, 0x90, 0x48, 0x01, 0x00, 0x00 };
-		const uint8_t hudXor[] = { 0xA2, 0xEC, 0x5A, 0x07, 0x01, 0xA1, 0xB4, 0x62, 0x07, 0x01 };
-		const uint8_t hudBit[] = { 0x83, 0xB0, 0x90, 0x01, 0x00, 0x00, 0x40 };
+		// mov ecx,[eax+18C] ; and ecx,40 ... mov ecx,[eax+12C] ... push FA3 (HUD mode -> crosshair tile)
+		const uint8_t hudBit[] = { 0x8B, 0x88, 0x8C, 0x01, 0x00, 0x00, 0x83, 0xE1, 0x40 };
+		const uint8_t hudTile[] = { 0x8B, 0x88, 0x2C, 0x01, 0x00, 0x00 };
+		const uint8_t hudVis[] = { 0x68, 0xA3, 0x0F, 0x00, 0x00 };
+		// Tile::GetValue / Tile::SetFloat: mov eax,[esp+4] ; push eax ; call (value lookup)
+		const uint8_t tileFn[] = { 0x8B, 0x44, 0x24, 0x04, 0x50, 0xE8 };
 		const uint8_t camRoot[] = { 0xA1, 0x24, 0xA2, 0x07, 0x01 };
 		const uint8_t spread[] = { 0xD9, 0x86, 0x04, 0x01, 0x00, 0x00 };  // fld [esi+104h] (minSpread)
 		const bool match = memcmp((const void*)addr::kIsMenuMode, isMenu, sizeof(isMenu)) == 0 &&
 		                   memcmp((const void*)addr::kGetWeaponStat, stat, sizeof(stat)) == 0 &&
 		                   memcmp((const void*)0x00701C71, statWeap, sizeof(statWeap)) == 0 &&
-		                   memcmp((const void*)0x0067B115, hudXor, sizeof(hudXor)) == 0 &&
-		                   memcmp((const void*)0x0067B123, hudBit, sizeof(hudBit)) == 0 &&
+		                   memcmp((const void*)0x0064E39C, hudBit, sizeof(hudBit)) == 0 &&
+		                   memcmp((const void*)0x0064E3AF, hudTile, sizeof(hudTile)) == 0 &&
+		                   memcmp((const void*)0x0064E3B8, hudVis, sizeof(hudVis)) == 0 &&
+		                   memcmp((const void*)addr::kTileGetFloat, tileFn, sizeof(tileFn)) == 0 &&
+		                   memcmp((const void*)addr::kTileSetFloat, tileFn, sizeof(tileFn)) == 0 &&
 		                   memcmp((const void*)0x0077D6C8, camRoot, sizeof(camRoot)) == 0 &&
 		                   memcmp((const void*)0x004BE71D, spread, sizeof(spread)) == 0;
 		if (!match)
 			Log("WARNING: crosshair code does not match; crosshair disabled");
-		else if (HookD3D9())
-			Log("hooked Direct3D 9 Present/Reset for the crosshair");
+		else if (HookD3D9()) {
+			Log("hooked IDirect3D9::CreateDevice for the crosshair");
+			const uintptr_t at = addr::kCallHudCrosshairVisible;
+			if (*(uint8_t*)at == 0xE8 && at + 5 + *(int32_t*)(at + 1) == addr::kTileSetFloat) {
+				DWORD old;
+				VirtualProtect((void*)at, 5, PAGE_EXECUTE_READWRITE, &old);
+				*(int32_t*)(at + 1) = (int32_t)((uintptr_t)&Hook_HudCrosshairVisible - (at + 5));
+				VirtualProtect((void*)at, 5, old, &old);
+				FlushInstructionCache(GetCurrentProcess(), (void*)at, 5);
+				Log("hooked HUD crosshair visibility at %08X", (unsigned)at);
+			} else {
+				Log("WARNING: HUD crosshair visibility call not found; the vanilla crosshair may flash");
+			}
+		}
 		else
 			Log("WARNING: could not hook Direct3D 9; crosshair disabled");
 	}
