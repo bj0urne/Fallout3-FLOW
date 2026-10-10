@@ -102,6 +102,12 @@ namespace addr {
 	// HUD mode change (0x64DE10): its call setting the crosshair's visibility (Tile::SetFloat)
 	constexpr uintptr_t kCallHudCrosshairVisible = 0x0064E3BD;
 	constexpr uintptr_t kSettingNonAttackWobble = 0x00F60530;  // fNonAttackGunWobbleMult (value at +4)
+	// Third person aim: the fire function (0x4BE1A0) creates each projectile with
+	// Projectile::Create (0x7C9D80, cdecl, 16 dword args: +1 shooter, +4..+6 start position,
+	// +7 heading, +8 pitch in radians) from this call.
+	constexpr uintptr_t kCallCreateProjectile = 0x004BF017;
+	constexpr uintptr_t kCreateProjectile   = 0x007C9D80;
+	constexpr uintptr_t kVATSMode           = 0x0108D0A0;  // int, 0 = not in VATS (GetVATSMode 0x5122D0)
 	constexpr uintptr_t kSettingHUDColor    = 0x01075B74;  // uHUDColor:Interface (RGBA, R in the high byte)
 	constexpr uintptr_t kCameraRoot         = 0x0107A224;  // scene camera root; +0xAC = NiCamera
 	constexpr uintptr_t kSlotSetMovementFlags = 0x0C;
@@ -249,6 +255,7 @@ struct CrosshairConfig {
 	float dotSize       = 3.0f;     // style 0: centre dot, pixels at 1080p (0 = none)
 	float scale         = 1.0f;     // gap = spread cone * scale (calibration)
 	float wobbleDeg     = 8.0f;     // degrees the gun sways at full wobble (measured: ~8)
+	bool  converge      = true;     // third person: shots fly along the crosshair line
 	float minGap        = 3.0f;     // pixels at 1080p
 	float lineLength    = 9.0f;     // pixels at 1080p
 	float thickness     = 2.0f;     // pixels at 1080p
@@ -374,6 +381,7 @@ static void LoadConfig()
 	x.dotSize    = IniFloat(path, "Crosshair", "fDotSize", x.dotSize);
 	x.scale      = IniFloat(path, "Crosshair", "fSpreadScale", x.scale);
 	x.wobbleDeg  = IniFloat(path, "Crosshair", "fWobbleDegrees", x.wobbleDeg);
+	x.converge   = b("Crosshair", "bThirdPersonAimAtCrosshair", x.converge);
 	x.minGap     = IniFloat(path, "Crosshair", "fMinGap", x.minGap);
 	x.lineLength = IniFloat(path, "Crosshair", "fLineLength", x.lineLength);
 	x.thickness  = IniFloat(path, "Crosshair", "fThickness", x.thickness);
@@ -394,8 +402,8 @@ static void LoadConfig()
 	clampf(x.thickness, 1.0f, 20.0f);
 	clampf(x.smoothTime, 0.0f, 1.0f);
 	clampf(x.opacity, 0.0f, 1.0f);
-	Log("config: Crosshair: iStyle=%d fSize=%.2f fDotSize=%.1f fWobbleDegrees=%.1f", x.style, x.size, x.dotSize,
-	    x.wobbleDeg);
+	Log("config: Crosshair: iStyle=%d fSize=%.2f fDotSize=%.1f fWobbleDegrees=%.1f bThirdPersonAimAtCrosshair=%d",
+	    x.style, x.size, x.dotSize, x.wobbleDeg, x.converge);
 	Log("config: Crosshair: bEnabled=%d fSpreadScale=%.2f fMinGap=%.1f fLineLength=%.1f fThickness=%.1f "
 	    "fSmoothMs=%.0f bUseHUDColor=%d rgb=%d,%d,%d fOpacity=%.2f bOutline=%d bHideWhenScoped=%d",
 	    x.enabled, x.scale, x.minGap, x.lineLength, x.thickness, x.smoothTime * 1000.0f, x.hudColor,
@@ -2283,6 +2291,78 @@ static void DrawCrosshair(IDirect3DDevice9* dev)
 	bb->Release();
 }
 
+// ---------------------------------------------------------------------------------------------
+// Third person aim: bullets start at the gun's muzzle and fly along the player's aim, parallel to
+// the camera's line through the crosshair, so up close they miss what the crosshair is on (and
+// anything in front of the barrel blocks them). Each shot is moved onto the crosshair line
+// instead: it starts on that line level with the gun and flies straight along it, so it hits
+// exactly what the crosshair shows. Any offset the game already gave the shot (shotgun pellets,
+// worn weapons) is kept, and the gun's sway is applied by the game afterwards as before.
+
+static bool g_vatsOk;  // the VATS mode global matched at load
+
+// Moves a player shot (start position, heading/pitch in radians) onto the crosshair line.
+static bool AimShotAlongCrosshair(NiPoint3* start, float* heading, float* pitch)
+{
+	uint8_t* pc = (uint8_t*)Player();
+	if (!pc || !g_vatsOk || *(int*)addr::kVATSMode != 0 || !InThirdPerson() || *(bool*)addr::kVanityCamera)
+		return false;
+	const float h = *(float*)(pc + off::kRefrRotZ), pt = *(float*)(pc + off::kRefrRotX);
+	// The game's own offset from the aim (pellets, worn weapons); shots far off the view are
+	// aimed by the game itself, leave those alone.
+	const float dh = WrapPi(*heading - h), dp = *pitch - pt;
+	if (std::fabs(dh) > 0.35f || std::fabs(dp) > 0.35f) return false;
+	uint8_t* camRoot = *(uint8_t**)addr::kCameraRoot;
+	NiAVObject* cam = camRoot ? *(NiAVObject**)(camRoot + 0xAC) : nullptr;
+	if (!cam) return false;
+	// The crosshair line is the camera's view axis: of the camera's axes, the one closest to the aim.
+	const NiPoint3 aim = { std::sin(h) * std::cos(pt), std::cos(h) * std::cos(pt), -std::sin(pt) };
+	const NiMatrix3& R = cam->world.rot;
+	NiPoint3 fwd = aim;
+	float bestDot = 0.0f;
+	for (int k = 0; k < 3; ++k) {
+		const NiPoint3 c = { R.m[0][k], R.m[1][k], R.m[2][k] };
+		const float d = c.x * aim.x + c.y * aim.y + c.z * aim.z;
+		if (std::fabs(d) > std::fabs(bestDot)) { bestDot = d; fwd = d < 0.0f ? NiPoint3{ -c.x, -c.y, -c.z } : c; }
+	}
+	if (std::fabs(bestDot) < 0.95f) return false;  // camera not looking along the aim
+	const NiPoint3& cp = cam->world.pos;
+	// Level with the gun: as far along the crosshair line as the muzzle is in front of the camera.
+	const float depth = std::fmax(0.0f, (start->x - cp.x) * fwd.x + (start->y - cp.y) * fwd.y +
+	                                      (start->z - cp.z) * fwd.z);
+	const NiPoint3 from = { cp.x + fwd.x * depth, cp.y + fwd.y * depth, cp.z + fwd.z * depth };
+	float nh = std::atan2(fwd.x, fwd.y) + dh;
+	if (nh >= 2.0f * kPi) nh -= 2.0f * kPi;
+	if (nh < 0.0f) nh += 2.0f * kPi;
+	const float np = -std::asin(std::fmax(-1.0f, std::fmin(1.0f, fwd.z))) + dp;
+	if (g_cfg.debug)
+		Log("aim line: shot moved %.0f units (from the muzzle to the crosshair line), turned %+.2f deg right, "
+		    "%+.2f deg down", std::sqrt((from.x - start->x) * (from.x - start->x) +
+		    (from.y - start->y) * (from.y - start->y) + (from.z - start->z) * (from.z - start->z)),
+		    WrapPi(nh - *heading) * kRadToDeg, (np - *pitch) * kRadToDeg);
+	*start = from;
+	*heading = nh;
+	*pitch = np;
+	return true;
+}
+
+typedef void*(__cdecl* CreateProjectile_t)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t,
+                                           uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t,
+                                           uint32_t, uint32_t);
+
+static void* __cdecl Hook_CreateProjectile(uint32_t a0, uint32_t shooter, uint32_t a2, uint32_t a3, float x, float y,
+                                           float z, float heading, float pitch, uint32_t a9, uint32_t a10, uint32_t a11,
+                                           uint32_t a12, uint32_t a13, uint32_t a14, uint32_t a15)
+{
+	if (g_cfg.xh.converge && shooter == (uint32_t)(uintptr_t)Player() && !PlayerRagdollReason()) {
+		NiPoint3 p = { x, y, z };
+		if (AimShotAlongCrosshair(&p, &heading, &pitch)) { x = p.x; y = p.y; z = p.z; }
+	}
+	auto bits = [](float f) { uint32_t u; memcpy(&u, &f, 4); return u; };
+	return ((CreateProjectile_t)addr::kCreateProjectile)(a0, shooter, a2, a3, bits(x), bits(y), bits(z), bits(heading),
+	                                                     bits(pitch), a9, a10, a11, a12, a13, a14, a15);
+}
+
 // The HUD mode change (aiming, menus closing...) sets the vanilla crosshair visible again; while
 // ours shows, keep it hidden right there, before the HUD draws it for a frame.
 static void __fastcall Hook_HudCrosshairVisible(void* tile, void*, uint32_t id, float value, bool propagate)
@@ -2541,6 +2621,20 @@ __declspec(dllexport) bool FOSEPlugin_Load(const FOSEInterface* fose)
 			Log("WARNING: crosshair code does not match; crosshair disabled");
 		else if (HookD3D9()) {
 			Log("hooked IDirect3D9::CreateDevice for the crosshair");
+			const uint8_t vats[] = { 0xDB, 0x05, 0xA0, 0xD0, 0x08, 0x01 };  // fild [VATS mode] in GetVATSMode
+			g_vatsOk = memcmp((const void*)0x005122DF, vats, sizeof(vats)) == 0;
+			const uintptr_t cp = addr::kCallCreateProjectile;
+			if (g_cfg.xh.converge && g_vatsOk && *(uint8_t*)cp == 0xE8 &&
+			    cp + 5 + *(int32_t*)(cp + 1) == addr::kCreateProjectile) {
+				DWORD old;
+				VirtualProtect((void*)cp, 5, PAGE_EXECUTE_READWRITE, &old);
+				*(int32_t*)(cp + 1) = (int32_t)((uintptr_t)&Hook_CreateProjectile - (cp + 5));
+				VirtualProtect((void*)cp, 5, old, &old);
+				FlushInstructionCache(GetCurrentProcess(), (void*)cp, 5);
+				Log("hooked projectile creation at %08X (third person shots aim at the crosshair)", (unsigned)cp);
+			} else if (g_cfg.xh.converge) {
+				Log("WARNING: projectile creation or VATS state do not match; third person shots stay vanilla");
+			}
 			const uintptr_t at = addr::kCallHudCrosshairVisible;
 			if (*(uint8_t*)at == 0xE8 && at + 5 + *(int32_t*)(at + 1) == addr::kTileSetFloat) {
 				DWORD old;
