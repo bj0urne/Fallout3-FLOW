@@ -109,6 +109,8 @@ namespace off {
 	constexpr uintptr_t kRenderStateNode = 0x14;   // render state -> 3rd person root NiNode
 	constexpr uintptr_t kPlayerMover     = 0x184;  // PlayerCharacter -> PlayerMover
 	constexpr uintptr_t kMoverFlags      = 0x94;   // PlayerMover -> movement flags
+	constexpr uintptr_t kMoverInputX     = 0x88;   // PlayerMover -> movement input vector (analog)
+	constexpr uintptr_t kMoverInputY     = 0x8C;
 	constexpr uintptr_t kThirdPerson     = 0x5A8;  // PlayerCharacter -> bool
 	constexpr uintptr_t kRagdollCtrl     = 0xA4;   // Actor -> bhkRagdollController (holds foot IK)
 	constexpr uintptr_t kFootIKEnabled   = 0x21D;  // bhkRagdollController -> bool (ToggleFootIK)
@@ -123,6 +125,7 @@ enum MoveFlags : uint32_t {
 	kMove_TurnLeft  = 0x10,
 	kMove_TurnRight = 0x20,
 	kMove_Turn      = 0x30,
+	kMove_Keyboard  = 0x40,  // set with keyboard movement: direction from the animation (8 ways)
 };
 
 struct NiMatrix3 { float m[3][3]; };
@@ -223,6 +226,7 @@ static struct Config {
 	bool  backDiagonals  = true;    // also turn the legs when moving diagonally backwards
 	bool  wholeBodyDiagonal = true; // weapon holstered: diagonals turn the whole body
 	bool  strafeAsRun    = true;    // weapon drawn: pure strafe = forward run with legs turned
+	bool  analog360      = true;    // controller: legs/body follow the exact stick angle
 	float strafeAngle    = 90.0f;   // degrees the legs turn for that
 	TurnConfig turn;
 	FreeLookConfig look;
@@ -282,6 +286,8 @@ static void LoadConfig()
 	g_cfg.backDiagonals = b("Diagonal", "bBackDiagonals", g_cfg.backDiagonals);
 	g_cfg.wholeBodyDiagonal = b("Diagonal", "bWholeBodyWhenHolstered", g_cfg.wholeBodyDiagonal);
 	g_cfg.strafeAsRun   = b("Diagonal", "bStrafeAsRunWithWeapon", g_cfg.strafeAsRun);
+	g_cfg.analog360     = b("Diagonal", "bController360", g_cfg.analog360);
+	Log("config: Diagonal: bController360=%d", g_cfg.analog360);
 	g_cfg.strafeAngle   = IniFloat(path, "Diagonal", "fStrafeAngle", g_cfg.strafeAngle);
 
 	TurnConfig& t = g_cfg.turn;
@@ -540,12 +546,22 @@ static struct State {
 	float       lastDHeading = 0.0f;
 	uint32_t    lastTurnBits = 0;   // debug logging only
 	uint32_t    strafeKeys = 0;     // real L/R key while a pure strafe is sent to the game as forward
+	bool        analog = false;     // controller stick movement (exact angle, see Hook_SetMovementFlags)
+	bool        analogBack = false; // playing the backward animation
+	float       analogAngle = 0.0f; // stick direction relative to facing, + = left
 	NiPoint3    pivot   = {};       // legs world position when it was applied
 	int64_t     lastQpc = 0;
 	uint32_t    lastFlags = 0;
 } g;
 
 static double g_qpcFreq;
+
+static int64_t QpcNow()
+{
+	LARGE_INTEGER li;
+	QueryPerformanceCounter(&li);
+	return li.QuadPart;
+}
 
 // Whole-body yaw applied at Bip01, relative to the actor heading (+ = left).
 static float BodyYawTotal()
@@ -626,8 +642,22 @@ static void Rescan(NiAVObject* root)
 	}
 }
 
+static float WrapPi(float a)
+{
+	while (a > kPi) a -= 2.0f * kPi;
+	while (a < -kPi) a += 2.0f * kPi;
+	return a;
+}
+
 static float TargetAngle(uint32_t flags)
 {
+	if (g.analog) {
+		// Controller: exact stick angle relative to the forward or backward animation.
+		if (g.analogBack && !g_cfg.backDiagonals) return 0.0f;
+		float t = g.analogBack ? WrapPi(g.analogAngle - kPi) : g.analogAngle;
+		const float lim = 125.0f * kDegToRad;
+		return t > lim ? lim : (t < -lim ? -lim : t);
+	}
 	const float a = g_cfg.maxAngle * kDegToRad;
 	const bool f = flags & kMove_Forward, bk = flags & kMove_Backward;
 	const bool l = flags & kMove_Left, r = flags & kMove_Right;
@@ -637,13 +667,6 @@ static float TargetAngle(uint32_t flags)
 	if (f) return l ? a : -a;                      // forward run: turn toward the side
 	if (!g_cfg.backDiagonals) return 0.0f;
 	return l ? -a : a;                             // backward run: turn away from the side
-}
-
-static float WrapPi(float a)
-{
-	while (a > kPi) a -= 2.0f * kPi;
-	while (a < -kPi) a += 2.0f * kPi;
-	return a;
 }
 
 // Exponential approach toward target; framerate independent and safe to call several times per
@@ -1142,6 +1165,41 @@ static uint32_t __fastcall Hook_PlayerMove(void* actor, void* /*edx*/, float f, 
 
 static void __fastcall Hook_SetMovementFlags(void* mover, void* /*edx*/, uint32_t flags)
 {
+	// Analog stick: with movement flag 0x40 clear, PlayerMover moves along its input vector
+	// (+0x88 x right, +0x8C y forward) instead of the animation's direction, and the direction
+	// flags only pick the animation (forward/back/left/right by the dominant axis). So the exact
+	// stick angle is read here, the forward or backward animation is chosen (forward up to 125
+	// degrees, back to forward below 100, so straight sideways is always forward and hovering
+	// doesn't flicker), and the legs/body are turned by the exact angle (TargetAngle). Keyboard
+	// (0x40 set) keeps its 8 directions.
+	const uint32_t dirIn = flags & kMove_Direction;
+	const bool wasAnalog = g.analog;
+	g.analog = false;
+	if (g_cfg.analog360 && g.legs && dirIn && !(flags & kMove_Keyboard) && InThirdPerson()) {
+		const float x = *(float*)((uint8_t*)mover + off::kMoverInputX);
+		const float y = *(float*)((uint8_t*)mover + off::kMoverInputY);
+		if (x * x + y * y > 0.0025f) {
+			const float phi = std::atan2(-x, y);  // + = left
+			const float a = std::fabs(phi);
+			// Forward zone extends well behind the side (straight left/right must stay forward).
+			if (!g.analogBack && a > 125.0f * kDegToRad) g.analogBack = true;
+			else if (g.analogBack && a < 100.0f * kDegToRad) g.analogBack = false;
+			g.analog = true;
+			g.analogAngle = phi;
+			flags = (flags & ~kMove_Direction) | (g.analogBack ? kMove_Backward : kMove_Forward);
+		}
+		if (g_cfg.debug) {
+			static int64_t lastLog;
+			const int64_t now = QpcNow();
+			if ((double)(now - lastLog) / g_qpcFreq > 0.25) {
+				lastLog = now;
+				Log("analog: input (%.2f, %.2f) flags %X -> %X angle %+.0f %s", x, y, dirIn,
+				    flags & kMove_Direction, g.analogAngle * kRadToDeg, g.analogBack ? "back" : "fwd");
+			}
+		}
+	}
+	if (wasAnalog && !g.analog && g_cfg.debug) Log("analog: off (flags %08X)", flags);
+
 	// Weapon drawn, pure strafe: tell the game "forward" so it plays the forward walk/run instead
 	// of the strafe animation; the legs are then turned 90 degrees (TargetAngle) and the movement
 	// vector is turned to match (Hook_AnimMoveVector). The real keys are kept in g.strafeKeys so
@@ -1149,7 +1207,7 @@ static void __fastcall Hook_SetMovementFlags(void* mover, void* /*edx*/, uint32_
 	const uint32_t dir = flags & kMove_Direction;
 	const bool pureStrafe = (dir == kMove_Left || dir == kMove_Right);
 	g.strafeKeys = 0;
-	if (g_cfg.strafeAsRun && g_strafeMoveHooked && pureStrafe && g.legs && g_stateChecksOk &&
+	if (!g.analog && g_cfg.strafeAsRun && g_strafeMoveHooked && pureStrafe && g.legs && g_stateChecksOk &&
 	    InThirdPerson() && PlayerWeaponOut()) {
 		g.strafeKeys = dir;
 		flags = (flags & ~kMove_Direction) | kMove_Forward;
