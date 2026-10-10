@@ -249,6 +249,7 @@ struct CrosshairConfig {
 	float dotSize       = 3.0f;     // style 0: centre dot, pixels at 1080p (0 = none)
 	float scale         = 1.0f;     // gap = spread cone * scale (calibration)
 	float wobbleDeg     = 8.0f;     // degrees the gun sways at full wobble (measured: ~8)
+	bool  pitchScale    = true;     // narrow the sideways gap when looking up/down (cos of the pitch)
 	float minGap        = 3.0f;     // pixels at 1080p
 	float lineLength    = 9.0f;     // pixels at 1080p
 	float thickness     = 2.0f;     // pixels at 1080p
@@ -374,6 +375,7 @@ static void LoadConfig()
 	x.dotSize    = IniFloat(path, "Crosshair", "fDotSize", x.dotSize);
 	x.scale      = IniFloat(path, "Crosshair", "fSpreadScale", x.scale);
 	x.wobbleDeg  = IniFloat(path, "Crosshair", "fWobbleDegrees", x.wobbleDeg);
+	x.pitchScale = b("Crosshair", "bNarrowWhenLookingUpDown", x.pitchScale);
 	x.minGap     = IniFloat(path, "Crosshair", "fMinGap", x.minGap);
 	x.lineLength = IniFloat(path, "Crosshair", "fLineLength", x.lineLength);
 	x.thickness  = IniFloat(path, "Crosshair", "fThickness", x.thickness);
@@ -394,8 +396,8 @@ static void LoadConfig()
 	clampf(x.thickness, 1.0f, 20.0f);
 	clampf(x.smoothTime, 0.0f, 1.0f);
 	clampf(x.opacity, 0.0f, 1.0f);
-	Log("config: Crosshair: iStyle=%d fSize=%.2f fDotSize=%.1f fWobbleDegrees=%.1f", x.style, x.size, x.dotSize,
-	    x.wobbleDeg);
+	Log("config: Crosshair: iStyle=%d fSize=%.2f fDotSize=%.1f fWobbleDegrees=%.1f bNarrowWhenLookingUpDown=%d",
+	    x.style, x.size, x.dotSize, x.wobbleDeg, x.pitchScale);
 	Log("config: Crosshair: bEnabled=%d fSpreadScale=%.2f fMinGap=%.1f fLineLength=%.1f fThickness=%.1f "
 	    "fSmoothMs=%.0f bUseHUDColor=%d rgb=%d,%d,%d fOpacity=%.2f bOutline=%d bHideWhenScoped=%d",
 	    x.enabled, x.scale, x.minGap, x.lineLength, x.thickness, x.smoothTime * 1000.0f, x.hudColor,
@@ -2130,12 +2132,12 @@ static void TexRect(IDirect3DDevice9* dev, float x0, float y0, float x1, float y
 }
 
 // Style 0: the halves of the game's crosshair move apart so their tips sit on the spread cone.
-static void DrawSplitCrosshair(IDirect3DDevice9* dev, const XhTex& img, float W, float H, D3DCOLOR color)
+static void DrawSplitCrosshair(IDirect3DDevice9* dev, const XhTex& img, float W, float H, float gap, D3DCOLOR color)
 {
 	const CrosshairConfig& cc = g_cfg.xh;
 	const float s = cc.size * H / 960.0f;  // interface units (960 = screen height) -> pixels
 	const float cx = W * 0.5f, cy = H * 0.5f;
-	const float off = std::fmax(0.0f, xh.gap - img.tip * s);
+	const float off = std::fmax(0.0f, gap - img.tip * s);
 	const float half = img.w * 0.5f * s;
 	const float yt = cy - img.centreY * s, yb = yt + img.h * s;
 	dev->SetFVF(D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_TEX1);
@@ -2258,18 +2260,24 @@ static void DrawCrosshair(IDirect3DDevice9* dev)
 
 	if (SUCCEEDED(dev->BeginScene())) {
 		const float cx = std::floor(W * 0.5f), cy = std::floor(H * 0.5f);
-		const float g = std::floor(xh.gap + 0.5f);
+		// The game sways shots as heading and pitch offsets. A heading offset turns the shot about
+		// the vertical axis, which moves it sideways less the steeper you look (cos of the pitch):
+		// straight up or down it barely moves it. The pitch offset is unaffected, so only the
+		// sideways gap narrows.
+		const float side = cc.pitchScale ? std::fabs(std::cos(PlayerPitch())) : 1.0f;
+		const float g = std::floor(xh.gap + 0.5f);  // up/down
+		const float gx = std::floor(std::fmax(xh.gap * side, split ? 0.0f : minGap) + 0.5f);  // sideways
 		const float len = std::fmax(2.0f, std::floor(cc.lineLength * k + 0.5f));
 		const float t = std::fmax(1.0f, std::floor(cc.thickness * k + 0.5f));
 		const float h0 = std::floor(t * 0.5f), h1 = t - h0;  // thickness split around the centre
 		auto lines = [&](float o, D3DCOLOR c) {
 			FillRect(dev, cx - h0 - o, cy - g - len - o, cx + h1 + o, cy - g + o, c);  // top
 			FillRect(dev, cx - h0 - o, cy + g - o, cx + h1 + o, cy + g + len + o, c);  // bottom
-			FillRect(dev, cx - g - len - o, cy - h0 - o, cx - g + o, cy + h1 + o, c);  // left
-			FillRect(dev, cx + g - o, cy - h0 - o, cx + g + len + o, cy + h1 + o, c);  // right
+			FillRect(dev, cx - gx - len - o, cy - h0 - o, cx - gx + o, cy + h1 + o, c);  // left
+			FillRect(dev, cx + gx - o, cy - h0 - o, cx + gx + len + o, cy + h1 + o, c);  // right
 		};
 		if (split) {
-			DrawSplitCrosshair(dev, img, W, H, color);
+			DrawSplitCrosshair(dev, img, W, H, xh.gap * side, color);
 		} else {
 			if (cc.outline) lines(1.0f, shadow);
 			lines(0.0f, color);
