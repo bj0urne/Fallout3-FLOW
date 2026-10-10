@@ -72,6 +72,9 @@ namespace addr {
 	// (0x45D370, thiscall, ret 10h). With movement flag 0x40 set (always, for the player) this
 	// animation root-motion vector, in the actor's local frame, is the direction you move.
 	constexpr uintptr_t kCallAnimMoveVector = 0x007E89ED;
+	// AnimData::PlayAnimGroup (thiscall, 4 args, ret 0x10; group = low byte of the first): starts an
+	// animation group on a skeleton's animation data (AnimData+8 = that skeleton's root).
+	constexpr uintptr_t kPlayAnimGroup      = 0x00461690;
 	constexpr uintptr_t kFrameDelta         = 0x01090BAC;  // main TimeGlobal frame delta (game seconds), as used by 0x45D370
 	constexpr uintptr_t kActorMove          = 0x00709320;  // Actor::Move, vtable +0x250
 	constexpr uintptr_t kSlotActorMove      = 0x250;
@@ -124,10 +127,13 @@ namespace addr {
 namespace vslot {
 	constexpr uintptr_t kProcessIsWeaponOut = 0x450;
 	constexpr uintptr_t kProcessKnockState  = 0x408;
+	constexpr uintptr_t kProcessIsAiming    = 0x400;  // aiming down the sights (HighProcess +0x228)
+	constexpr uintptr_t kProcessCharController = 0x288;  // bhkCharacterController*; state at +0x270
 	constexpr uintptr_t kActorSitSleepState = 0x214;
 }
 
 namespace off {
+	constexpr uintptr_t kFirstPersonNode = 0x5F0;  // PlayerCharacter -> first person skeleton root
 	constexpr uintptr_t kRefrRotX        = 0x20;   // TESObjectREFR pitch, radians (look up/down)
 	constexpr uintptr_t kRefrRotZ        = 0x28;   // TESObjectREFR heading, radians
 	constexpr uintptr_t kRefrPos         = 0x2C;   // TESObjectREFR position (feet for actors)
@@ -269,6 +275,17 @@ struct CrosshairConfig {
 	bool  hideScoped    = true;
 };
 
+struct GunSwayConfig {
+	bool  enabled = true;
+	float amount  = 0.3f;    // share of the view's turn the gun trails behind
+	float time    = 0.1f;    // seconds: how quickly the gun catches up
+	float maxDeg  = 8.0f;    // the sway approaches this (degrees), ever more slowly
+	bool  smoothJump = true; // no first person jump/land animations; a soft dip instead
+	bool  lockPitch = true;  // the arms follow the view up/down fully (no vanilla pitch shift)
+	float jumpDip = 1.5f;    // units the arms dip when jumping
+	float landDip = 3.0f;    // ...and when landing after about a second in the air
+};
+
 static struct Config {
 	bool  enabled        = true;
 	float upperBodyTurn  = 0.0f;    // 0 = upper body keeps facing forward, 1 = turns with the legs
@@ -286,6 +303,7 @@ static struct Config {
 	MoveConfig move;
 	CameraConfig cam;
 	CrosshairConfig xh;
+	GunSwayConfig sway;
 	char  bodyNode[64]   = "Scene Root";  // whole body turn; Scene Root = the actor's 3D root
 	bool  footIKOff      = false;   // pause the game's foot IK while the body/legs are turned
 	char  legsNode[64]   = "Bip01 Pelvis";
@@ -375,6 +393,24 @@ static void LoadConfig()
 	m.accel         = b("Moving", "bAcceleration", m.accel);
 	m.accelTime     = IniFloat(path, "Moving", "fAccelerationMs", m.accelTime * 1000.0f) / 1000.0f;
 	m.decelTime     = IniFloat(path, "Moving", "fDecelerationMs", m.decelTime * 1000.0f) / 1000.0f;
+
+	GunSwayConfig& gs = g_cfg.sway;
+	gs.enabled = b("GunSway", "bEnabled", gs.enabled);
+	gs.amount  = IniFloat(path, "GunSway", "fAmount", gs.amount);
+	gs.time    = IniFloat(path, "GunSway", "fCatchUpMs", gs.time * 1000.0f) / 1000.0f;
+	gs.maxDeg  = IniFloat(path, "GunSway", "fMaxDegrees", gs.maxDeg);
+	clampf(gs.amount, 0.0f, 2.0f);
+	clampf(gs.time, 0.01f, 2.0f);
+	clampf(gs.maxDeg, 0.0f, 30.0f);
+	gs.smoothJump = b("GunSway", "bSmoothJump", gs.smoothJump);
+	gs.lockPitch  = b("GunSway", "bLockPitch", gs.lockPitch);
+	gs.jumpDip    = IniFloat(path, "GunSway", "fJumpDip", gs.jumpDip);
+	gs.landDip    = IniFloat(path, "GunSway", "fLandDip", gs.landDip);
+	clampf(gs.jumpDip, 0.0f, 20.0f);
+	clampf(gs.landDip, 0.0f, 20.0f);
+	Log("config: GunSway: bEnabled=%d fAmount=%.2f fCatchUpMs=%.0f fMaxDegrees=%.1f bSmoothJump=%d fJumpDip=%.1f "
+	    "fLandDip=%.1f bLockPitch=%d", gs.enabled, gs.amount, gs.time * 1000.0f, gs.maxDeg, gs.smoothJump, gs.jumpDip,
+	    gs.landDip, gs.lockPitch);
 
 	CrosshairConfig& x = g_cfg.xh;
 	x.enabled    = b("Crosshair", "bEnabled", x.enabled);
@@ -1379,9 +1415,277 @@ static void __fastcall Hook_SetMovementFlags(void* mover, void* /*edx*/, uint32_
 typedef void(__thiscall* UpdateWorldData_t)(NiAVObject*, void*);
 static UpdateWorldData_t g_origUpdateWorldData;
 
+// ---------------------------------------------------------------------------------------------
+// First person gun sway: the arms and gun lag a little behind the view when looking around and
+// float back (as in Half-Life 2). The first person camera belongs to the first person skeleton
+// (player+0x5F0, a node at the feet turned with the heading), so turning its root would turn the
+// view too. Instead both arms (the clavicles; the gun is in the right hand) get the same small
+// rotation about the head right after the game places them each frame, so they move as one piece
+// and the view stays put. Purely visual: shots fly along the crosshair line. Fades out when aiming down the
+// sights (the view zooms in), in menus and VATS, and with the weapon holstered.
+
+// Aiming down the sights: the player's process keeps it at +0x228 (HighProcess: SetAiming 0x3F8,
+// which refuses in VATS, stores it via 0x3FC; IsAiming 0x400 = 0x73B3D0 reads it).
+static bool PlayerAiming()
+{
+	void* proc = PlayerProcess();
+	return proc && VCall<bool>(proc, vslot::kProcessIsAiming);
+}
+
+static struct SwayState {
+	bool    init = false;
+	float   lastH = 0.0f, lastP = 0.0f;   // view heading/pitch at the last frame
+	float   lagH = 0.0f, lagP = 0.0f;      // how far the gun trails the view (radians)
+	float   velH = 0.0f, velP = 0.0f;
+	float   weight = 0.0f;                 // 0..1: faded out when aiming, in menus...
+	int64_t lastQpc = 0;
+	bool    seen = false;
+	float   oh = 0.0f, op = 0.0f;          // the offset applied this frame (radians)
+	float   pitch = 0.0f;                  // view pitch this frame (+ = down)
+	float   dip = 0.0f, dipVel = 0.0f;     // jump/land dip: units down, springing back
+	int     airState = 0;                  // character controller: 0 ground, 1 jumping, 2 in the air
+	float   airTime = 0.0f;                // seconds off the ground
+	NiAVObject* root = nullptr;            // first person skeleton the nodes below were found in
+	NiAVObject* head = nullptr;            // pivot
+	NiAVObject* arms[2] = {};              // left and right clavicle
+} g_sway;
+static bool g_swayChecksOk;  // menu mode and VATS state functions matched at load
+
+static NiAVObject* FirstPersonRoot()
+{
+	uint8_t* pc = (uint8_t*)Player();
+	return pc ? *(NiAVObject**)(pc + off::kFirstPersonNode) : nullptr;
+}
+
+// Rotation by angle (radians) about a unit axis.
+static NiMatrix3 AxisAngle(const NiPoint3& a, float angle)
+{
+	const float c = std::cos(angle), s = std::sin(angle), t = 1.0f - c;
+	NiMatrix3 r;
+	r.m[0][0] = c + t * a.x * a.x;       r.m[0][1] = t * a.x * a.y - s * a.z; r.m[0][2] = t * a.x * a.z + s * a.y;
+	r.m[1][0] = t * a.x * a.y + s * a.z; r.m[1][1] = c + t * a.y * a.y;       r.m[1][2] = t * a.y * a.z - s * a.x;
+	r.m[2][0] = t * a.x * a.z - s * a.y; r.m[2][1] = t * a.y * a.z + s * a.x; r.m[2][2] = c + t * a.z * a.z;
+	return r;
+}
+
+static NiMatrix3 MatMul(const NiMatrix3& a, const NiMatrix3& b)
+{
+	NiMatrix3 r;
+	for (int i = 0; i < 3; ++i)
+		for (int j = 0; j < 3; ++j)
+			r.m[i][j] = a.m[i][0] * b.m[0][j] + a.m[i][1] * b.m[1][j] + a.m[i][2] * b.m[2][j];
+	return r;
+}
+
+// Finds the arms and the head in the first person skeleton (again when it is rebuilt).
+static bool FindSwayNodes(NiAVObject* root)
+{
+	if (root == g_sway.root) return g_sway.arms[0] && g_sway.arms[1] && g_sway.head;
+	g_sway.root = root;
+	g_sway.head = FindByName(root, "Bip01 Head");
+	g_sway.arms[0] = FindByName(root, "Bip01 L Clavicle");
+	g_sway.arms[1] = FindByName(root, "Bip01 R Clavicle");
+	Log("gun sway: first person skeleton %p: head %p, clavicles %p %p", (void*)root, (void*)g_sway.head,
+	    (void*)g_sway.arms[0], (void*)g_sway.arms[1]);
+	if (g_cfg.debug && root && !g_sway.seen) {
+		g_sway.seen = true;
+		Log("first person skeleton:");
+		DumpTree(root, 1);
+	}
+	return g_sway.arms[0] && g_sway.arms[1] && g_sway.head;
+}
+
+// Advances the sway once a frame (the nodes may be updated more than once a frame).
+static void UpdateGunSway()
+{
+	uint8_t* pc = (uint8_t*)Player();
+	if (!pc) return;
+	// Vanilla: the first person arms follow only fFirstPersonHandFollowMult (0.85) of the view's
+	// pitch (player function 0x7757E0), so the gun shifts when looking up or down. Full follow:
+	// the gun stays put on screen. Set every frame: the game setting may be reloaded.
+	static const bool handFollowOk = *(const char* const*)0x00F5EA50 &&
+	                                 strcmp(*(const char* const*)0x00F5EA50, "fFirstPersonHandFollowMult") == 0;
+	if (g_cfg.sway.lockPitch && handFollowOk) *(float*)0x00F5EA4C = 1.0f;
+	const GunSwayConfig& c = g_cfg.sway;
+	const int64_t now = QpcNow();
+	double dt = g_sway.lastQpc ? (double)(now - g_sway.lastQpc) / g_qpcFreq : 0.0;
+	const float h = *(float*)(pc + off::kRefrRotZ), p = *(float*)(pc + off::kRefrRotX);
+	if (!g_sway.init || dt > 0.0005) {
+		g_sway.lastQpc = now;
+		// Not updated for a while (third person, menus, loading): start fresh.
+		if (dt > 0.25) g_sway.init = false;
+		if (dt > 0.1) dt = 0.1;
+		if (!g_sway.init) {
+			g_sway.lastH = h;
+			g_sway.lastP = p;
+			g_sway.lagH = g_sway.lagP = g_sway.velH = g_sway.velP = 0.0f;
+			g_sway.dip = g_sway.dipVel = 0.0f;
+			g_sway.init = true;
+		}
+		const float dH = WrapPi(h - g_sway.lastH), dP = p - g_sway.lastP;
+		g_sway.lastH = h;
+		g_sway.lastP = p;
+		if (std::fabs(dH) > 1.5f || std::fabs(dP) > 1.5f) {  // teleport, load, view snap: start fresh
+			g_sway.lagH = g_sway.lagP = g_sway.velH = g_sway.velP = 0.0f;
+		} else {
+			// The view turned, the gun hasn't yet. The lag is the gun's offset itself; the further
+			// out it already is, the less more turning adds (none at the limit), so it eases into
+			// the limit and starts back as soon as the turn ends instead of resting against it.
+			const float mx = c.maxDeg * kDegToRad;
+			auto push = [mx](float lag, float in) {
+				if (mx <= 0.0f) return 0.0f;
+				if (lag * in > 0.0f) {  // outward
+					const float room = std::fmax(0.0f, 1.0f - std::fabs(lag) / mx);
+					in *= room * room;
+				}
+				return lag + in;
+			};
+			g_sway.lagH = push(g_sway.lagH, -dH * c.amount);
+			g_sway.lagP = push(g_sway.lagP, -dP * c.amount);
+		}
+		g_sway.lagH = SmoothDamp(g_sway.lagH, 0.0f, &g_sway.velH, dt, c.time);
+		g_sway.lagP = SmoothDamp(g_sway.lagP, 0.0f, &g_sway.velP, dt, c.time);
+
+		// Jump and land: the arms dip and spring back (instead of the first person jump animations).
+		if (c.smoothJump) {
+			void* proc = PlayerProcess();
+			uint8_t* cc = proc ? VCall<uint8_t*>(proc, vslot::kProcessCharController) : nullptr;
+			const int state = cc ? (int)*(uint32_t*)(cc + 0x270) : 0;
+			constexpr float kW = 2.0f * kPi / 0.45f;  // spring: about 0.45 s per bounce
+			if (state != g_sway.airState) {
+				if (g_cfg.debug) Log("gun sway: jump state %d -> %d (%.2f s in the air)", g_sway.airState, state, g_sway.airTime);
+				if (g_sway.airState == 0 && state == 1)          // took off
+					g_sway.dipVel += c.jumpDip * kW * 1.6f;
+				else if (g_sway.airState != 0 && state == 0)     // landed: harder the longer the fall
+					g_sway.dipVel += c.landDip * kW * 1.6f * std::fmin(1.5f, std::fmax(0.3f, g_sway.airTime));
+				if (state == 0) g_sway.airTime = 0.0f;
+				g_sway.airState = state;
+			}
+			if (state != 0) g_sway.airTime += (float)dt;
+			const float acc = -kW * kW * g_sway.dip - 2.0f * 0.55f * kW * g_sway.dipVel;
+			g_sway.dipVel += acc * (float)dt;
+			g_sway.dip += g_sway.dipVel * (float)dt;
+		}
+
+		// Fade: first person with the weapon out, not aiming down the sights, not in a menu or VATS.
+		const bool active = !InThirdPerson() && PlayerWeaponOut() && g_swayChecksOk && !PlayerAiming() &&
+		                    !((bool(__cdecl*)())addr::kIsMenuMode)() && *(int*)addr::kVATSMode == 0 &&
+		                    !PlayerRagdollReason();
+		g_sway.weight = Approach(g_sway.weight, active ? 1.0f : 0.0f, dt, 0.1f);
+
+		g_sway.oh = g_sway.lagH * g_sway.weight;  // + = gun points right of the view
+		g_sway.op = g_sway.lagP * g_sway.weight;  // + = gun points below the view
+		g_sway.pitch = p;
+		if (g_cfg.debug) {
+			static int64_t lastLog;
+			if ((double)(now - lastLog) / g_qpcFreq > 2.0) {
+				lastLog = now;
+				Log("gun sway: offset %+.2f right %+.2f down deg (weight %.2f)", g_sway.oh * kRadToDeg,
+				    g_sway.op * kRadToDeg, g_sway.weight);
+			}
+		}
+	}
+}
+
+// Turns one arm (with everything on it) about the head by this frame's offset, about the view's
+// own up and right axes (the skeleton root's frame, +Y heading, +Z up, +X right, tilted by the
+// view's pitch), so both arms move as one piece and the sway looks the same at any pitch.
+static void ApplyGunSwayTo(NiAVObject* node)
+{
+	const float dip = g_sway.dip * g_sway.weight;
+	const float oh = g_sway.oh, op = g_sway.op + dip * 0.6f * kDegToRad;  // dipping tilts the gun down a bit
+	if (std::fabs(oh) < 1e-5f && std::fabs(op) < 1e-5f && std::fabs(dip) < 1e-3f) return;
+	const NiMatrix3& B = g_sway.root->world.rot;
+	const NiPoint3 bodyUp = { B.m[0][2], B.m[1][2], B.m[2][2] }, fwd = { B.m[0][1], B.m[1][1], B.m[2][1] };
+	const NiPoint3 right = { B.m[0][0], B.m[1][0], B.m[2][0] };
+	// looking down tips the view's up forward
+	const float cp = std::cos(g_sway.pitch), sp = std::sin(g_sway.pitch);
+	const NiPoint3 up = { bodyUp.x * cp + fwd.x * sp, bodyUp.y * cp + fwd.y * sp, bodyUp.z * cp + fwd.z * sp };
+	// Heading to the right is clockwise about up; pitch down is about -right.
+	const NiMatrix3 R = MatMul(AxisAngle(up, -oh), AxisAngle(right, -op));
+	const NiPoint3 c = g_sway.head->world.pos;
+	const NiPoint3 d = { node->world.pos.x - c.x, node->world.pos.y - c.y, node->world.pos.z - c.z };
+	node->world.pos = { c.x + R.m[0][0] * d.x + R.m[0][1] * d.y + R.m[0][2] * d.z,
+	                    c.y + R.m[1][0] * d.x + R.m[1][1] * d.y + R.m[1][2] * d.z,
+	                    c.z + R.m[2][0] * d.x + R.m[2][1] * d.y + R.m[2][2] * d.z };
+	node->world.rot = MatMul(R, node->world.rot);
+	node->world.pos = { node->world.pos.x - up.x * dip, node->world.pos.y - up.y * dip, node->world.pos.z - up.z * dip };
+}
+
+// First person jump/land animations are skipped (the dip above replaces their shake): the hook
+// at AnimData::PlayAnimGroup returns "nothing played" for jump groups on the first person
+// skeleton's animation data.
+extern "C" bool __cdecl STRIDE_SkipAnimGroup(uint8_t* animData, uint32_t groupId)
+{
+	if (!g_cfg.sway.enabled || !g_cfg.sway.smoothJump || !animData) return false;
+	const uint32_t g = groupId & 0xFF;
+	const bool jump = (g >= 168 && g <= 170) || (g >= 174 && g <= 177) || (g >= 179 && g <= 182);
+	if (!jump) return false;
+	NiAVObject* fp = FirstPersonRoot();
+	const bool first = fp && *(NiAVObject**)(animData + 8) == fp;
+	if (g_cfg.debug) {
+		static int n;
+		if (n++ < 12)
+			Log("gun sway: jump animation group %u requested on %s skeleton%s", g,
+			    first ? "the first person" : "another", first ? " - skipped" : "");
+	}
+	return first;
+}
+
+extern "C" void STRIDE_PlayAnimGroupStub();
+__asm__(
+	".text\n"
+	".globl _STRIDE_PlayAnimGroupStub\n"
+	"_STRIDE_PlayAnimGroupStub:\n"
+	"	pushl %ecx\n"
+	"	pushl 8(%esp)\n"            // group id
+	"	pushl %ecx\n"               // animation data
+	"	call _STRIDE_SkipAnimGroup\n"
+	"	addl $8, %esp\n"
+	"	popl %ecx\n"
+	"	testb %al, %al\n"
+	"	jnz 1f\n"
+	"	pushl %ebx\n"               // the overwritten instructions
+	"	movl 8(%esp), %ebx\n"
+	"	pushl $0x00461695\n"
+	"	ret\n"
+	"1:\n"
+	"	xorl %eax, %eax\n"          // nothing played
+	"	ret $0x10\n");
+
+static bool PatchVtableSlot(uintptr_t vtbl, uintptr_t slot, uintptr_t expect, void* fn);
+
 static void __fastcall Hook_UpdateWorldData(NiAVObject* self, void* /*edx*/, void* updateData)
 {
 	g_origUpdateWorldData(self, updateData);
+
+	if (g_cfg.sway.enabled) {
+		NiAVObject* fp = FirstPersonRoot();
+		if (fp && self == fp) {  // updated before its children: advance the sway for this frame
+			if (FindSwayNodes(fp)) UpdateGunSway();
+			return;
+		}
+		if (fp && fp == g_sway.root && (self == g_sway.arms[0] || self == g_sway.arms[1])) {
+			ApplyGunSwayTo(self);
+			return;
+		}
+		// The first person root's class may not be one of the hooked node classes: hook it too
+		// (once a second check, same verification as the others).
+		static int64_t lastCheck;
+		static uintptr_t patchedVtbl;
+		const int64_t now = QpcNow();
+		if (fp && (double)(now - lastCheck) / g_qpcFreq > 1.0) {
+			lastCheck = now;
+			const uintptr_t vt = (uintptr_t)fp->vtbl;
+			if (vt != addr::kNiNodeVtbl && vt != addr::kRootNodeVtbl && vt != patchedVtbl) {
+				patchedVtbl = vt;
+				if (PatchVtableSlot(vt, addr::kSlotUpdateWorldData, addr::kUpdateWorldData, (void*)&Hook_UpdateWorldData))
+					Log("gun sway: hooked the first person root's UpdateWorldData (vtable %08X)", (unsigned)vt);
+				else
+					Log("WARNING: gun sway: first person root (vtable %08X) not hookable; no gun sway", (unsigned)vt);
+			}
+		}
+	}
 
 	if (self == g.body || self == g.legs || self == g.upper || self == g.neck || self == g.head ||
 	    self == g.spine1 || self == g.spine2) {
@@ -2611,6 +2915,31 @@ __declspec(dllexport) bool FOSEPlugin_Load(const FOSEInterface* fose)
 		const uint8_t sit[] = { 0x8B, 0x07, 0x8B, 0x90, 0x14, 0x02, 0x00, 0x00 };
 		// mov edx,[eax] ; mov ecx,eax ; mov eax,[edx+408]
 		const uint8_t knock[] = { 0x8B, 0x10, 0x8B, 0xC8, 0x8B, 0x82, 0x08, 0x04, 0x00, 0x00 };
+		// gun sway: IsMenuMode (mov eax,[menu stack] ; test eax,eax) and GetVATSMode (fild [VATS mode])
+		const uint8_t isMenu[] = { 0xA1, 0x24, 0x5B, 0x07, 0x01, 0x85, 0xC0 };
+		const uint8_t vats[] = { 0xDB, 0x05, 0xA0, 0xD0, 0x08, 0x01 };
+		// and HighProcess::IsAiming: mov al,[ecx+228] ; ret
+		const uint8_t aiming[] = { 0x8A, 0x81, 0x28, 0x02, 0x00, 0x00, 0xC3 };
+		g_swayChecksOk = memcmp((const void*)addr::kIsMenuMode, isMenu, sizeof(isMenu)) == 0 &&
+		                 memcmp((const void*)0x005122DF, vats, sizeof(vats)) == 0 &&
+		                 *(uintptr_t*)(0x00E15224 + vslot::kProcessIsAiming) == 0x0073B3D0 &&
+		                 memcmp((const void*)0x0073B3D0, aiming, sizeof(aiming)) == 0;
+		if (!g_swayChecksOk && g_cfg.sway.enabled) Log("WARNING: menu/VATS state functions do not match; no gun sway");
+		// push ebx ; mov ebx,[esp+8] ; push ebp ; push esi ; push edi ; push ebx
+		const uint8_t playGroup[] = { 0x53, 0x8B, 0x5C, 0x24, 0x08, 0x55, 0x56, 0x57, 0x53 };
+		if (g_cfg.sway.enabled && g_cfg.sway.smoothJump && g_swayChecksOk &&
+		    memcmp((const void*)addr::kPlayAnimGroup, playGroup, sizeof(playGroup)) == 0) {
+			const uintptr_t at = addr::kPlayAnimGroup;
+			DWORD old;
+			VirtualProtect((void*)at, 5, PAGE_EXECUTE_READWRITE, &old);
+			*(uint8_t*)at = 0xE9;
+			*(int32_t*)(at + 1) = (int32_t)((uintptr_t)&STRIDE_PlayAnimGroupStub - (at + 5));
+			VirtualProtect((void*)at, 5, old, &old);
+			FlushInstructionCache(GetCurrentProcess(), (void*)at, 5);
+			Log("hooked AnimData::PlayAnimGroup at %08X (first person jump animations replaced by a dip)", (unsigned)at);
+		} else if (g_cfg.sway.enabled && g_cfg.sway.smoothJump) {
+			Log("WARNING: PlayAnimGroup does not match; first person jump animations stay vanilla");
+		}
 		g_stateChecksOk = memcmp((const void*)addr::kIsWeaponOut, weapon, sizeof(weapon)) == 0 &&
 		                  memcmp((const void*)addr::kGetSittingUse, sit, sizeof(sit)) == 0 &&
 		                  memcmp((const void*)addr::kGetKnockedUse, knock, sizeof(knock)) == 0;
