@@ -256,6 +256,8 @@ struct CrosshairConfig {
 	float scale         = 1.0f;     // gap = spread cone * scale (calibration)
 	float wobbleDeg     = 8.0f;     // degrees the gun sways at full wobble (measured: ~8)
 	bool  converge      = true;     // third person: shots fly along the crosshair line
+	bool  convergeFirst = true;     // first person: the same
+	bool  hideTracers   = true;     // no tracer on those shots (it would come out of the camera)
 	float minGap        = 3.0f;     // pixels at 1080p
 	float lineLength    = 9.0f;     // pixels at 1080p
 	float thickness     = 2.0f;     // pixels at 1080p
@@ -382,6 +384,8 @@ static void LoadConfig()
 	x.scale      = IniFloat(path, "Crosshair", "fSpreadScale", x.scale);
 	x.wobbleDeg  = IniFloat(path, "Crosshair", "fWobbleDegrees", x.wobbleDeg);
 	x.converge   = b("Crosshair", "bThirdPersonAimAtCrosshair", x.converge);
+	x.convergeFirst = b("Crosshair", "bFirstPersonAimAtCrosshair", x.convergeFirst);
+	x.hideTracers   = b("Crosshair", "bHideTracersOnCrosshairLine", x.hideTracers);
 	x.minGap     = IniFloat(path, "Crosshair", "fMinGap", x.minGap);
 	x.lineLength = IniFloat(path, "Crosshair", "fLineLength", x.lineLength);
 	x.thickness  = IniFloat(path, "Crosshair", "fThickness", x.thickness);
@@ -402,8 +406,9 @@ static void LoadConfig()
 	clampf(x.thickness, 1.0f, 20.0f);
 	clampf(x.smoothTime, 0.0f, 1.0f);
 	clampf(x.opacity, 0.0f, 1.0f);
-	Log("config: Crosshair: iStyle=%d fSize=%.2f fDotSize=%.1f fWobbleDegrees=%.1f bThirdPersonAimAtCrosshair=%d",
-	    x.style, x.size, x.dotSize, x.wobbleDeg, x.converge);
+	Log("config: Crosshair: iStyle=%d fSize=%.2f fDotSize=%.1f fWobbleDegrees=%.1f bThirdPersonAimAtCrosshair=%d "
+	    "bFirstPersonAimAtCrosshair=%d bHideTracersOnCrosshairLine=%d",
+	    x.style, x.size, x.dotSize, x.wobbleDeg, x.converge, x.convergeFirst, x.hideTracers);
 	Log("config: Crosshair: bEnabled=%d fSpreadScale=%.2f fMinGap=%.1f fLineLength=%.1f fThickness=%.1f "
 	    "fSmoothMs=%.0f bUseHUDColor=%d rgb=%d,%d,%d fOpacity=%.2f bOutline=%d bHideWhenScoped=%d",
 	    x.enabled, x.scale, x.minGap, x.lineLength, x.thickness, x.smoothTime * 1000.0f, x.hudColor,
@@ -2292,9 +2297,10 @@ static void DrawCrosshair(IDirect3DDevice9* dev)
 }
 
 // ---------------------------------------------------------------------------------------------
-// Third person aim: bullets start at the gun's muzzle and fly along the player's aim, parallel to
-// the camera's line through the crosshair, so up close they miss what the crosshair is on (and
-// anything in front of the barrel blocks them). Each shot is moved onto the crosshair line
+// Aim along the crosshair line: bullets start at the gun's muzzle and fly along the player's aim,
+// parallel to the camera's line through the crosshair, so in third person they miss what the
+// crosshair is on up close, and in both views anything in front of the barrel (a railing, a
+// corner the eyes see past) blocks them. Each shot is moved onto the crosshair line
 // instead: it starts on that line level with the gun and flies straight along it, so it hits
 // exactly what the crosshair shows. Any offset the game already gave the shot (shotgun pellets,
 // worn weapons) is kept, and the gun's sway is applied by the game afterwards as before.
@@ -2305,8 +2311,8 @@ static bool g_vatsOk;  // the VATS mode global matched at load
 static bool AimShotAlongCrosshair(NiPoint3* start, float* heading, float* pitch)
 {
 	uint8_t* pc = (uint8_t*)Player();
-	if (!pc || !g_vatsOk || *(int*)addr::kVATSMode != 0 || !InThirdPerson() || *(bool*)addr::kVanityCamera)
-		return false;
+	if (!pc || !g_vatsOk || *(int*)addr::kVATSMode != 0 || *(bool*)addr::kVanityCamera) return false;
+	if (!(InThirdPerson() ? g_cfg.xh.converge : g_cfg.xh.convergeFirst)) return false;
 	const float h = *(float*)(pc + off::kRefrRotZ), pt = *(float*)(pc + off::kRefrRotX);
 	// The game's own offset from the aim (pellets, worn weapons); shots far off the view are
 	// aimed by the game itself, leave those alone.
@@ -2346,6 +2352,25 @@ static bool AimShotAlongCrosshair(NiPoint3* start, float* heading, float* pitch)
 	return true;
 }
 
+// A shot on the crosshair line starts beside the camera and flies straight away from it, so its
+// tracer appears to come out of the camera (and from the wrong side while strafing): show the
+// plain bullet instead. Bullets (missile projectiles) only. The game rolls the tracer at the end
+// of creation into flag 0x10 at +0xC0 and, when the model is set up (0x7C4878), shows child 1
+// (tracer) and hides child 0 (bullet) if it is set, or the other way round. Clear the flag, and if
+// the model already exists, show/hide its children the same way.
+static void HideTracer(uint8_t* proj, uint8_t* form)
+{
+	if ((*(uint32_t*)(form + 0x60) & 0xF0000) != 0x10000) return;  // not a bullet
+	uint32_t& flags = *(uint32_t*)(proj + 0xC0);
+	if (!(flags & 0x10)) return;
+	flags &= ~0x10u;
+	if (*(float*)(form + 0x78) == 0.0f) return;  // no tracer chance: the model has no tracer part
+	NiNode* root = AsNode(VCall<NiAVObject*>(proj, 0x1D0));  // Get3D
+	if (!root || root->firstFree < 2) return;
+	if (root->children[0]) root->children[0]->flags &= ~1u;  // bullet shown
+	if (root->children[1]) root->children[1]->flags |= 1u;   // tracer culled
+}
+
 typedef void*(__cdecl* CreateProjectile_t)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t,
                                            uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t,
                                            uint32_t, uint32_t);
@@ -2354,13 +2379,18 @@ static void* __cdecl Hook_CreateProjectile(uint32_t a0, uint32_t shooter, uint32
                                            float z, float heading, float pitch, uint32_t a9, uint32_t a10, uint32_t a11,
                                            uint32_t a12, uint32_t a13, uint32_t a14, uint32_t a15)
 {
-	if (g_cfg.xh.converge && shooter == (uint32_t)(uintptr_t)Player() && !PlayerRagdollReason()) {
+	bool moved = false;
+	if ((g_cfg.xh.converge || g_cfg.xh.convergeFirst) && shooter == (uint32_t)(uintptr_t)Player() &&
+	    !PlayerRagdollReason()) {
 		NiPoint3 p = { x, y, z };
-		if (AimShotAlongCrosshair(&p, &heading, &pitch)) { x = p.x; y = p.y; z = p.z; }
+		if (AimShotAlongCrosshair(&p, &heading, &pitch)) { x = p.x; y = p.y; z = p.z; moved = true; }
 	}
 	auto bits = [](float f) { uint32_t u; memcpy(&u, &f, 4); return u; };
-	return ((CreateProjectile_t)addr::kCreateProjectile)(a0, shooter, a2, a3, bits(x), bits(y), bits(z), bits(heading),
-	                                                     bits(pitch), a9, a10, a11, a12, a13, a14, a15);
+	void* proj = ((CreateProjectile_t)addr::kCreateProjectile)(a0, shooter, a2, a3, bits(x), bits(y), bits(z),
+	                                                           bits(heading), bits(pitch), a9, a10, a11, a12, a13,
+	                                                           a14, a15);
+	if (moved && proj && g_cfg.xh.hideTracers) HideTracer((uint8_t*)proj, (uint8_t*)(uintptr_t)a0);
+	return proj;
 }
 
 // The HUD mode change (aiming, menus closing...) sets the vanilla crosshair visible again; while
@@ -2624,15 +2654,17 @@ __declspec(dllexport) bool FOSEPlugin_Load(const FOSEInterface* fose)
 			const uint8_t vats[] = { 0xDB, 0x05, 0xA0, 0xD0, 0x08, 0x01 };  // fild [VATS mode] in GetVATSMode
 			g_vatsOk = memcmp((const void*)0x005122DF, vats, sizeof(vats)) == 0;
 			const uintptr_t cp = addr::kCallCreateProjectile;
-			if (g_cfg.xh.converge && g_vatsOk && *(uint8_t*)cp == 0xE8 &&
+			const bool aimLine = g_cfg.xh.converge || g_cfg.xh.convergeFirst;
+			if (aimLine && g_vatsOk && *(uint8_t*)cp == 0xE8 &&
 			    cp + 5 + *(int32_t*)(cp + 1) == addr::kCreateProjectile) {
 				DWORD old;
 				VirtualProtect((void*)cp, 5, PAGE_EXECUTE_READWRITE, &old);
 				*(int32_t*)(cp + 1) = (int32_t)((uintptr_t)&Hook_CreateProjectile - (cp + 5));
 				VirtualProtect((void*)cp, 5, old, &old);
 				FlushInstructionCache(GetCurrentProcess(), (void*)cp, 5);
-				Log("hooked projectile creation at %08X (third person shots aim at the crosshair)", (unsigned)cp);
-			} else if (g_cfg.xh.converge) {
+				Log("hooked projectile creation at %08X (shots fly along the crosshair line: third person %d, "
+				    "first person %d)", (unsigned)cp, g_cfg.xh.converge, g_cfg.xh.convergeFirst);
+			} else if (aimLine) {
 				Log("WARNING: projectile creation or VATS state do not match; third person shots stay vanilla");
 			}
 			const uintptr_t at = addr::kCallHudCrosshairVisible;
