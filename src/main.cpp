@@ -1,4 +1,4 @@
-// FLOW (Gameplay Overhaul) - FOSE plugin for Fallout 3 (1.7.0.3): third person
+// FLOW (Player Control Overhaul) - FOSE plugin for Fallout 3 (1.7.0.3): third person
 // movement, camera and crosshair, and first person gun sway. It started with making the player's
 // third person legs move more naturally (the upper body, aim and camera are never affected):
 //   Diagonal:     when moving diagonally, the legs face the direction of travel instead of running

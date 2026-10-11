@@ -1,4 +1,4 @@
-FLOW (Gameplay Overhaul)
+FLOW (Player Control Overhaul)
 Version {VERSION} for Fallout 3
 =========================================================
 

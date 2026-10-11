@@ -5,7 +5,7 @@ Fallout 3's movement, aiming and camera, finally feeling modern. Legs that face 
 
 === Short description (under 350 words) ===
 
-FLOW (Gameplay Overhaul) makes moving, aiming and looking around in Fallout 3 feel like a modern game, in both third and first person.
+FLOW (Player Control Overhaul) makes moving, aiming and looking around in Fallout 3 feel like a modern game, in both third and first person.
 
 In third person your legs face where you're going, your character turns in place with planted feet, strafing keeps your aim steady, starts and stops ease in and out, and landings no longer lock you in a stumble. Free look lets you look around while your character stands still.
 

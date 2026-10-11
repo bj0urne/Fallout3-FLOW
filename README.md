@@ -1,4 +1,4 @@
-# FLOW (Gameplay Overhaul)
+# FLOW (Player Control Overhaul)
 
 A [FOSE](https://fose.silverlock.org/) plugin for **Fallout 3** that reworks how the player moves, aims and looks. In third person the legs, body and camera move naturally. Shots go where the crosshair points. First person gets weapon inertia like modern games.
 
