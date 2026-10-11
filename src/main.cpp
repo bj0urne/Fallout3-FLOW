@@ -76,6 +76,9 @@ namespace addr {
 	// AnimData::PlayAnimGroup (thiscall, 4 args, ret 0x10; group = low byte of the first): starts an
 	// animation group on a skeleton's animation data (AnimData+8 = that skeleton's root).
 	constexpr uintptr_t kPlayAnimGroup      = 0x00461690;
+	// Plays an actor's footstep sound (cdecl(actor, foot), foot 0 left, 1 right, 2/3 back left/right):
+	// what the animation text keys "Enum: Left/Right" call (text key dispatch 0x54C29E).
+	constexpr uintptr_t kPlayFootstep       = 0x006C53A0;
 	constexpr uintptr_t kFrameDelta         = 0x01090BAC;  // main TimeGlobal frame delta (game seconds), as used by 0x45D370
 	constexpr uintptr_t kActorMove          = 0x00709320;  // Actor::Move, vtable +0x250
 	constexpr uintptr_t kSlotActorMove      = 0x250;
@@ -204,6 +207,7 @@ static_assert(offsetof(NiNode, firstFree) == 0xA6, "firstFree");
 // Config (Data\FOSE\Plugins\FCCO.ini)
 
 constexpr float kPi       = 3.14159265f;
+constexpr float kRunSpeed = 294.0f;  // the player's normal running speed (units per second, measured)
 constexpr float kDegToRad = kPi / 180.0f;
 constexpr float kRadToDeg = 180.0f / kPi;
 constexpr uint32_t kTileVisible = 0xFA3;  // kTileValue_visible
@@ -285,6 +289,9 @@ struct GunSwayConfig {
 	bool  lockPitch = true;  // the arms follow the view up/down fully (no vanilla pitch shift)
 	float jumpDip = 1.5f;    // units the arms dip when jumping
 	float landDip = 3.0f;    // ...and when landing after about a second in the air
+	bool  smoothSteps = true; // no first person walk/run animations; a soft dip per step instead
+	float stepDip = 0.6f;    // units the arms dip per step when running (walking: less)
+	float stepSway = 0.5f;   // ...and sway to the side (alternating each step)
 };
 
 static struct Config {
@@ -409,9 +416,14 @@ static void LoadConfig()
 	gs.landDip    = IniFloat(path, "GunSway", "fLandDip", gs.landDip);
 	clampf(gs.jumpDip, 0.0f, 20.0f);
 	clampf(gs.landDip, 0.0f, 20.0f);
+	gs.smoothSteps = b("GunSway", "bSmoothSteps", gs.smoothSteps);
+	gs.stepDip     = IniFloat(path, "GunSway", "fStepDip", gs.stepDip);
+	gs.stepSway    = IniFloat(path, "GunSway", "fStepSway", gs.stepSway);
+	clampf(gs.stepDip, 0.0f, 10.0f);
+	clampf(gs.stepSway, 0.0f, 10.0f);
 	Log("config: GunSway: bEnabled=%d fAmount=%.2f fCatchUpMs=%.0f fMaxDegrees=%.1f bSmoothJump=%d fJumpDip=%.1f "
-	    "fLandDip=%.1f bLockPitch=%d", gs.enabled, gs.amount, gs.time * 1000.0f, gs.maxDeg, gs.smoothJump, gs.jumpDip,
-	    gs.landDip, gs.lockPitch);
+	    "fLandDip=%.1f bLockPitch=%d bSmoothSteps=%d fStepDip=%.2f fStepSway=%.2f", gs.enabled, gs.amount, gs.time * 1000.0f,
+	    gs.maxDeg, gs.smoothJump, gs.jumpDip, gs.landDip, gs.lockPitch, gs.smoothSteps, gs.stepDip, gs.stepSway);
 
 	CrosshairConfig& x = g_cfg.xh;
 	x.enabled    = b("Crosshair", "bEnabled", x.enabled);
@@ -1446,11 +1458,16 @@ static struct SwayState {
 	float   dip = 0.0f, dipVel = 0.0f;     // jump/land dip: units down, springing back
 	int     airState = 0;                  // character controller: 0 ground, 1 jumping, 2 in the air
 	float   airTime = 0.0f;                // seconds off the ground
+	NiPoint3 lastPos = {};                 // player position at the last frame (step bob speed)
+	float   speed = 0.0f;                  // smoothed ground speed, units per second
+	float   stepPhase = 0.0f;              // 0..2: a left and a right step (fraction = into this step)
+	float   stepAmp = 0.0f;                // current step dip depth, units
 	NiAVObject* root = nullptr;            // first person skeleton the nodes below were found in
 	NiAVObject* head = nullptr;            // pivot
 	NiAVObject* arms[2] = {};              // left and right clavicle
 } g_sway;
 static bool g_swayChecksOk;  // menu mode and VATS state functions matched at load
+static bool g_footstepOk;    // footstep function matched and the walk animations are skipped
 
 static NiAVObject* FirstPersonRoot()
 {
@@ -1521,6 +1538,8 @@ static void UpdateGunSway()
 			g_sway.lastP = p;
 			g_sway.lagH = g_sway.lagP = g_sway.velH = g_sway.velP = 0.0f;
 			g_sway.dip = g_sway.dipVel = 0.0f;
+			g_sway.lastPos = *(NiPoint3*)(pc + off::kRefrPos);
+			g_sway.speed = g_sway.stepPhase = g_sway.stepAmp = 0.0f;
 			g_sway.init = true;
 		}
 		const float dH = WrapPi(h - g_sway.lastH), dP = p - g_sway.lastP;
@@ -1547,11 +1566,46 @@ static void UpdateGunSway()
 		g_sway.lagH = SmoothDamp(g_sway.lagH, 0.0f, &g_sway.velH, dt, c.time);
 		g_sway.lagP = SmoothDamp(g_sway.lagP, 0.0f, &g_sway.velP, dt, c.time);
 
+		void* proc = PlayerProcess();
+		uint8_t* cc = proc ? VCall<uint8_t*>(proc, vslot::kProcessCharController) : nullptr;
+		const int state = cc ? (int)*(uint32_t*)(cc + 0x270) : 0;
+
+		// Steps: the arms dip down and back up once per step (instead of the first person walk/run
+		// animations). The pace and depth follow the ground speed: walking takes slower, shallower
+		// steps than running; nothing in the air.
+		if (c.smoothSteps) {
+			const NiPoint3 pos = *(NiPoint3*)(pc + off::kRefrPos);
+			const float dx = pos.x - g_sway.lastPos.x, dy = pos.y - g_sway.lastPos.y;
+			g_sway.lastPos = pos;
+			float v = dt > 0.0 ? std::sqrt(dx * dx + dy * dy) / (float)dt : 0.0f;
+			if (v > 3000.0f) v = g_sway.speed;  // teleport, load door: keep the last speed
+			g_sway.speed += (v - g_sway.speed) * std::fmin(1.0f, (float)dt / 0.08f);
+			const float run = std::fmin(1.3f, g_sway.speed / kRunSpeed);  // 1 = running
+			const bool stepping = state == 0 && g_sway.speed > 20.0f;
+			const float target = stepping ? c.stepDip * std::fmax(0.35f, run) : 0.0f;
+			g_sway.stepAmp = Approach(g_sway.stepAmp, target, dt, 0.15f);
+			const float before = g_sway.stepPhase;
+			if (stepping) g_sway.stepPhase += (1.4f + 1.3f * run) * (float)dt;  // steps per second
+			else if (g_sway.stepAmp < 0.01f) g_sway.stepPhase = 0.0f;  // the next walk starts with a step
+			// The foot lands at the bottom of each dip (half way through the step): play its footstep,
+			// as the skipped walk/run animation's text keys would have.
+			if (stepping && g_footstepOk && !InThirdPerson() && !((bool(__cdecl*)())addr::kIsMenuMode)()) {
+				for (float k = 0.5f; k < 4.0f; k += 1.0f) {
+					if (before < k && g_sway.stepPhase >= k) {
+						const int foot = (int)(k - 0.5f) & 1;
+						((void(__cdecl*)(void*, int))addr::kPlayFootstep)(pc, foot);
+						if (g_cfg.debug) {
+							static int n;
+							if (n++ < 6) Log("gun sway: footstep %s (speed %.0f)", foot ? "right" : "left", g_sway.speed);
+						}
+					}
+				}
+			}
+			g_sway.stepPhase -= 2.0f * std::floor(g_sway.stepPhase * 0.5f);
+		}
+
 		// Jump and land: the arms dip and spring back (instead of the first person jump animations).
 		if (c.smoothJump) {
-			void* proc = PlayerProcess();
-			uint8_t* cc = proc ? VCall<uint8_t*>(proc, vslot::kProcessCharController) : nullptr;
-			const int state = cc ? (int)*(uint32_t*)(cc + 0x270) : 0;
 			constexpr float kW = 2.0f * kPi / 0.45f;  // spring: about 0.45 s per bounce
 			if (state != g_sway.airState) {
 				if (g_cfg.debug) Log("gun sway: jump state %d -> %d (%.2f s in the air)", g_sway.airState, state, g_sway.airTime);
@@ -1591,11 +1645,18 @@ static void UpdateGunSway()
 // Turns one arm (with everything on it) about the head by this frame's offset, about the view's
 // own up and right axes (the skeleton root's frame, +Y heading, +Z up, +X right, tilted by the
 // view's pitch), so both arms move as one piece and the sway looks the same at any pitch.
+// side sway per unit of step dip
+static float c_stepSide() { return g_cfg.sway.stepDip > 1e-3f ? g_cfg.sway.stepSway / g_cfg.sway.stepDip : 0.0f; }
+
 static void ApplyGunSwayTo(NiAVObject* node)
 {
-	const float dip = g_sway.dip * g_sway.weight;
+	// A smooth dip per step, down and back up (0 at the start and end of each step), swaying to
+	// one side and then the other: furthest out at the bottom of each dip.
+	const float step = g_sway.stepAmp * 0.5f * (1.0f - std::cos(2.0f * kPi * g_sway.stepPhase));
+	const float side = c_stepSide() * g_sway.stepAmp * std::sin(kPi * g_sway.stepPhase) * g_sway.weight;
+	const float dip = (g_sway.dip + step) * g_sway.weight;
 	const float oh = g_sway.oh, op = g_sway.op + dip * 0.6f * kDegToRad;  // dipping tilts the gun down a bit
-	if (std::fabs(oh) < 1e-5f && std::fabs(op) < 1e-5f && std::fabs(dip) < 1e-3f) return;
+	if (std::fabs(oh) < 1e-5f && std::fabs(op) < 1e-5f && std::fabs(dip) < 1e-3f && std::fabs(side) < 1e-3f) return;
 	const NiMatrix3& B = g_sway.root->world.rot;
 	const NiPoint3 bodyUp = { B.m[0][2], B.m[1][2], B.m[2][2] }, fwd = { B.m[0][1], B.m[1][1], B.m[2][1] };
 	const NiPoint3 right = { B.m[0][0], B.m[1][0], B.m[2][0] };
@@ -1610,49 +1671,54 @@ static void ApplyGunSwayTo(NiAVObject* node)
 	                    c.y + R.m[1][0] * d.x + R.m[1][1] * d.y + R.m[1][2] * d.z,
 	                    c.z + R.m[2][0] * d.x + R.m[2][1] * d.y + R.m[2][2] * d.z };
 	node->world.rot = MatMul(R, node->world.rot);
-	node->world.pos = { node->world.pos.x - up.x * dip, node->world.pos.y - up.y * dip, node->world.pos.z - up.z * dip };
+	node->world.pos = { node->world.pos.x - up.x * dip + right.x * side, node->world.pos.y - up.y * dip + right.y * side,
+	                    node->world.pos.z - up.z * dip + right.z * side };
 }
 
-// First person jump/land animations are skipped (the dip above replaces their shake): the hook
-// at AnimData::PlayAnimGroup returns "nothing played" for jump groups on the first person
-// skeleton's animation data.
-extern "C" bool __cdecl FCCO_SkipAnimGroup(uint8_t* animData, uint32_t groupId)
-{
-	if (!g_cfg.sway.enabled || !g_cfg.sway.smoothJump || !animData) return false;
-	const uint32_t g = groupId & 0xFF;
-	const bool jump = (g >= 168 && g <= 170) || (g >= 174 && g <= 177) || (g >= 179 && g <= 182);
-	if (!jump) return false;
-	NiAVObject* fp = FirstPersonRoot();
-	const bool first = fp && *(NiAVObject**)(animData + 8) == fp;
-	if (g_cfg.debug) {
-		static int n;
-		if (n++ < 12)
-			Log("gun sway: jump animation group %u requested on %s skeleton%s", g,
-			    first ? "the first person" : "another", first ? " - skipped" : "");
-	}
-	return first;
-}
-
-extern "C" void FCCO_PlayAnimGroupStub();
+// AnimData::PlayAnimGroup (0x461690), hooked with a jump to Hook_PlayAnimGroup, on the first
+// person skeleton's animation data:
+// jump/land and walk/run animations are skipped ("nothing played"), so the arms keep their idle
+// pose; the jump/land and step dips above replace their shake and bob. (Playing them with no weight
+// is not enough: once the idle has blended out, a lone sequence is applied at full strength.) The
+// walk/run animations only move Bip01, Bip01 Translate/Rotate and Camera1st, and carry the
+// footstep text keys ("Enum: Left/Right"); those footsteps are played by the step bob instead.
+extern "C" void FCCO_PlayAnimGroupOrig();  // the original's first two instructions, then the rest of it
 __asm__(
 	".text\n"
-	".globl _FCCO_PlayAnimGroupStub\n"
-	"_FCCO_PlayAnimGroupStub:\n"
-	"	pushl %ecx\n"
-	"	pushl 8(%esp)\n"            // group id
-	"	pushl %ecx\n"               // animation data
-	"	call _FCCO_SkipAnimGroup\n"
-	"	addl $8, %esp\n"
-	"	popl %ecx\n"
-	"	testb %al, %al\n"
-	"	jnz 1f\n"
-	"	pushl %ebx\n"               // the overwritten instructions
+	".globl _FCCO_PlayAnimGroupOrig\n"
+	"_FCCO_PlayAnimGroupOrig:\n"
+	"	pushl %ebx\n"
 	"	movl 8(%esp), %ebx\n"
 	"	pushl $0x00461695\n"
-	"	ret\n"
-	"1:\n"
-	"	xorl %eax, %eax\n"          // nothing played
-	"	ret $0x10\n");
+	"	ret\n");
+typedef void*(__thiscall* PlayAnimGroup_t)(void*, uint32_t, uint32_t, int32_t, int32_t);
+
+static void* __fastcall Hook_PlayAnimGroup(uint8_t* animData, void* /*edx*/, uint32_t groupId, uint32_t now,
+                                           int32_t a3, int32_t a4)
+{
+	const PlayAnimGroup_t orig = (PlayAnimGroup_t)(uintptr_t)&FCCO_PlayAnimGroupOrig;
+	const uint32_t g = groupId & 0xFF;
+	const bool jump = g_cfg.sway.smoothJump &&
+	                  ((g >= 168 && g <= 170) || (g >= 174 && g <= 177) || (g >= 179 && g <= 182));
+	const bool walk = g_cfg.sway.smoothSteps && g >= 3 && g <= 10;  // Forward..FastRight
+	if (!g_cfg.sway.enabled || !animData || (!jump && !walk)) return orig(animData, groupId, now, a3, a4);
+	NiAVObject* fp = FirstPersonRoot();
+	if (!fp || *(NiAVObject**)(animData + 8) != fp) return orig(animData, groupId, now, a3, a4);
+	if (g_cfg.debug) {
+		// counted per second too: a skipped group the game asks for again every frame would show here
+		static int n, perSec;
+		static int64_t secStart;
+		const int64_t t = QpcNow();
+		if ((double)(t - secStart) / g_qpcFreq > 1.0) {
+			if (perSec > 5) Log("gun sway: %d skipped first person animation requests in the last second", perSec);
+			secStart = t;
+			perSec = 0;
+		}
+		++perSec;
+		if (n++ < 12) Log("gun sway: first person %s animation group %u skipped", jump ? "jump" : "walk/run", g);
+	}
+	return nullptr;
+}
 
 static bool PatchVtableSlot(uintptr_t vtbl, uintptr_t slot, uintptr_t expect, void* fn);
 
@@ -2928,18 +2994,28 @@ __declspec(dllexport) bool FOSEPlugin_Load(const FOSEInterface* fose)
 		if (!g_swayChecksOk && g_cfg.sway.enabled) Log("WARNING: menu/VATS state functions do not match; no gun sway");
 		// push ebx ; mov ebx,[esp+8] ; push ebp ; push esi ; push edi ; push ebx
 		const uint8_t playGroup[] = { 0x53, 0x8B, 0x5C, 0x24, 0x08, 0x55, 0x56, 0x57, 0x53 };
-		if (g_cfg.sway.enabled && g_cfg.sway.smoothJump && g_swayChecksOk &&
+		// push -1 ; push 0xC6A0B8 (SEH) ; mov eax,fs:[0]
+		const uint8_t footstep[] = { 0x6A, 0xFF, 0x68, 0xB8, 0xA0, 0xC6, 0x00, 0x64, 0xA1, 0x00, 0x00, 0x00, 0x00 };
+		const bool footOk = memcmp((const void*)addr::kPlayFootstep, footstep, sizeof(footstep)) == 0;
+		if (g_cfg.sway.smoothSteps && !footOk) {
+			Log("WARNING: footstep function does not match; first person walk animations stay vanilla");
+			g_cfg.sway.smoothSteps = false;
+		}
+		const bool wantAnimHook = g_cfg.sway.enabled && (g_cfg.sway.smoothJump || g_cfg.sway.smoothSteps);
+		if (wantAnimHook && g_swayChecksOk &&
 		    memcmp((const void*)addr::kPlayAnimGroup, playGroup, sizeof(playGroup)) == 0) {
 			const uintptr_t at = addr::kPlayAnimGroup;
 			DWORD old;
 			VirtualProtect((void*)at, 5, PAGE_EXECUTE_READWRITE, &old);
 			*(uint8_t*)at = 0xE9;
-			*(int32_t*)(at + 1) = (int32_t)((uintptr_t)&FCCO_PlayAnimGroupStub - (at + 5));
+			*(int32_t*)(at + 1) = (int32_t)((uintptr_t)&Hook_PlayAnimGroup - (at + 5));
 			VirtualProtect((void*)at, 5, old, &old);
 			FlushInstructionCache(GetCurrentProcess(), (void*)at, 5);
-			Log("hooked AnimData::PlayAnimGroup at %08X (first person jump animations replaced by a dip)", (unsigned)at);
-		} else if (g_cfg.sway.enabled && g_cfg.sway.smoothJump) {
-			Log("WARNING: PlayAnimGroup does not match; first person jump animations stay vanilla");
+			g_footstepOk = g_cfg.sway.smoothSteps;
+			Log("hooked AnimData::PlayAnimGroup at %08X (first person animations replaced by dips: jump %d, walk/run %d)",
+			    (unsigned)at, g_cfg.sway.smoothJump, g_cfg.sway.smoothSteps);
+		} else if (wantAnimHook) {
+			Log("WARNING: PlayAnimGroup does not match; first person jump and walk animations stay vanilla");
 		}
 		g_stateChecksOk = memcmp((const void*)addr::kIsWeaponOut, weapon, sizeof(weapon)) == 0 &&
 		                  memcmp((const void*)addr::kGetSittingUse, sit, sizeof(sit)) == 0 &&
