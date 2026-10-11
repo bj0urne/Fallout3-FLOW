@@ -1,10 +1,10 @@
-"""Build the Nexus release archives for FCCO.
+"""Build the Nexus release archives for GFO.
 
     python package.py
 
-Produces in FCCO\\dist\\:
-    FCCO-<version>.zip          main file: Data-relative layout for Vortex / MO2 / manual install
-    FCCO-<version>-source.zip   optional file: source code and tools
+Produces in GFO\\dist\\:
+    GFO-<version>.zip          main file: Data-relative layout for Vortex / MO2 / manual install
+    GFO-<version>-source.zip   optional file: source code and tools
 
 Rebuilds the DLL first, then checks the result: debug options off in the shipped INI, the main
 features on, and the DLL exports the FOSE entry points.
@@ -71,11 +71,11 @@ def ini_sections(ini):
 
 def main():
     ver = version()
-    print(f"FCCO {ver}: building")
+    print(f"GFO {ver}: building")
     build()
 
     readme = open(os.path.join(ROOT, "README.txt"), encoding="utf-8").read().replace("{VERSION}", ver)
-    ini = open(os.path.join(ROOT, "FCCO.ini"), "rb").read()
+    ini = open(os.path.join(ROOT, "GFO.ini"), "rb").read()
 
     # Release checks
     problems = []
@@ -91,30 +91,30 @@ def main():
     for (sec, key), want in expect.items():
         got = cfg.get(sec, {}).get(key)
         if got != want:
-            problems.append(f"FCCO.ini: expected [{sec}] {key}={want}, found {got}")
-    exports = dll_exports(os.path.join(BUILD, "FCCO.dll"))
+            problems.append(f"GFO.ini: expected [{sec}] {key}={want}, found {got}")
+    exports = dll_exports(os.path.join(BUILD, "GFO.dll"))
     for name in ("FOSEPlugin_Query", "FOSEPlugin_Load"):
         if name not in exports:
-            problems.append(f"FCCO.dll does not export {name}")
+            problems.append(f"GFO.dll does not export {name}")
     if "{VERSION}" in readme or ver not in readme:
         problems.append("README.txt: version not filled in")
     if problems:
         raise SystemExit("release checks failed:\n  " + "\n  ".join(problems))
 
     main_files = [
-        ("FOSE/Plugins/FCCO.dll", open(os.path.join(BUILD, "FCCO.dll"), "rb").read()),
-        ("FOSE/Plugins/FCCO.ini", ini),
-        ("FOSE/Plugins/FCCO - Readme.txt", readme.replace("\r\n", "\n").replace("\n", "\r\n").encode("utf-8")),
+        ("FOSE/Plugins/GFO.dll", open(os.path.join(BUILD, "GFO.dll"), "rb").read()),
+        ("FOSE/Plugins/GFO.ini", ini),
+        ("FOSE/Plugins/GFO - Readme.txt", readme.replace("\r\n", "\n").replace("\n", "\r\n").encode("utf-8")),
     ]
 
     source_files = []
-    for rel in ["README.md", "README.txt", "LICENSE", "FCCO.ini", "build.ps1", "nexus_description.txt",
+    for rel in ["README.md", "README.txt", "LICENSE", "GFO.ini", "build.ps1", "nexus_description.txt",
                 "nexus_summary.txt", "src/main.cpp", "tools/package.py"]:
-        source_files.append((f"FCCO-{ver}-source/{rel}", open(os.path.join(ROOT, rel), "rb").read()))
+        source_files.append((f"GFO-{ver}-source/{rel}", open(os.path.join(ROOT, rel), "rb").read()))
 
     os.makedirs(DIST, exist_ok=True)
     stamp = time.localtime()[:6]
-    for name, files in ((f"FCCO-{ver}.zip", main_files), (f"FCCO-{ver}-source.zip", source_files)):
+    for name, files in ((f"GFO-{ver}.zip", main_files), (f"GFO-{ver}-source.zip", source_files)):
         path = os.path.join(DIST, name)
         with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
             for arc, data in files:
