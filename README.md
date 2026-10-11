@@ -29,6 +29,7 @@ Everything is done in the engine at runtime: no custom skeleton, no animation re
 - **Smooth jumps:** the vanilla jump and land weapon shake is replaced by a soft dip that springs back. Longer falls dip more.
 - **Smooth steps:** the vanilla walk/run weapon bob is replaced by a soft dip per step that sways to alternating sides. It is quicker and deeper the faster you move, with the game's own footstep sound where each foot lands.
 - **Steady gun when looking up and down:** vanilla shifts the weapon on screen as you pitch the view; FCCO keeps it in place.
+- **Crouch pose:** while crouched, the gun eases a little lower and to the left, and back when you stand up.
 
 Every patch site is checked byte for byte before anything is written. On a mismatch, FCCO logs the reason and leaves that feature vanilla.
 

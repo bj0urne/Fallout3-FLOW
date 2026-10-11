@@ -167,7 +167,8 @@ enum MoveFlags : uint32_t {
 	kMove_TurnLeft  = 0x10,
 	kMove_TurnRight = 0x20,
 	kMove_Turn      = 0x30,
-	kMove_Keyboard  = 0x40,  // set with keyboard movement: direction from the animation (8 ways)
+	kMove_Keyboard  = 0x40,
+	kMove_Sneak     = 0x400,  // set with keyboard movement: direction from the animation (8 ways)
 };
 
 struct NiMatrix3 { float m[3][3]; };
@@ -297,6 +298,8 @@ struct GunSwayConfig {
 	float stepDip = 0.6f;    // units the arms dip per step when running (walking: less)
 	float stepSway = 0.5f;   // ...and sway to the side (alternating each step)
 	float strafeShift = 2.0f; // units the gun glides against sideways movement (at running speed)
+	float crouchDip = 2.0f;   // units the gun sits lower while crouched
+	float crouchLeft = 2.0f;  // ...and further to the left
 };
 
 static struct Config {
@@ -429,10 +432,14 @@ static void LoadConfig()
 	clampf(gs.stepSway, 0.0f, 10.0f);
 	gs.strafeShift = IniFloat(path, "GunSway", "fStrafeShift", gs.strafeShift);
 	clampf(gs.strafeShift, 0.0f, 20.0f);
+	gs.crouchDip  = IniFloat(path, "GunSway", "fCrouchDip", gs.crouchDip);
+	gs.crouchLeft = IniFloat(path, "GunSway", "fCrouchLeft", gs.crouchLeft);
+	clampf(gs.crouchDip, 0.0f, 20.0f);
+	clampf(gs.crouchLeft, -20.0f, 20.0f);
 	Log("config: GunSway: bEnabled=%d fAmount=%.2f fCatchUpMs=%.0f fMaxDegrees=%.1f bSmoothJump=%d fJumpDip=%.1f "
-	    "fLandDip=%.1f bLockPitch=%d bSmoothSteps=%d fStepDip=%.2f fStepSway=%.2f fStrafeShift=%.2f", gs.enabled,
-	    gs.amount, gs.time * 1000.0f, gs.maxDeg, gs.smoothJump, gs.jumpDip, gs.landDip, gs.lockPitch, gs.smoothSteps,
-	    gs.stepDip, gs.stepSway, gs.strafeShift);
+	    "fLandDip=%.1f bLockPitch=%d bSmoothSteps=%d fStepDip=%.2f fStepSway=%.2f fStrafeShift=%.2f fCrouchDip=%.2f "
+	    "fCrouchLeft=%.2f", gs.enabled, gs.amount, gs.time * 1000.0f, gs.maxDeg, gs.smoothJump, gs.jumpDip, gs.landDip,
+	    gs.lockPitch, gs.smoothSteps, gs.stepDip, gs.stepSway, gs.strafeShift, gs.crouchDip, gs.crouchLeft);
 
 	CrosshairConfig& x = g_cfg.xh;
 	x.enabled    = b("Crosshair", "bEnabled", x.enabled);
@@ -1470,11 +1477,13 @@ static struct SwayState {
 	float   stepAmp = 0.0f;                // current step dip depth, units
 	float   strafe = 0.0f, strafeVel = 0.0f; // sideways glide (units, + = right of the view)
 	float   moveX = 0.0f;                    // sideways movement the glide follows (units/s), held in short air
+	float   crouch = 0.0f, crouchVel = 0.0f; // 0..1: how far into the crouch pose the gun is
 	NiAVObject* root = nullptr;            // first person skeleton the nodes below were found in
 	NiAVObject* head = nullptr;            // pivot
 	NiAVObject* arms[2] = {};              // left and right clavicle
 } g_sway;
 static bool g_swayChecksOk;  // menu mode and VATS state functions matched at load
+constexpr float kDipW = 2.0f * kPi / 0.45f;  // the dip spring's frequency (about 0.45 s per bounce)
 static bool g_footstepOk;    // footstep function matched and the walk animations are skipped
 
 static NiAVObject* FirstPersonRoot()
@@ -1550,6 +1559,7 @@ static void UpdateGunSway()
 			g_sway.speed = g_sway.stepPhase = g_sway.stepAmp = 0.0f;
 			g_sway.strafe = g_sway.strafeVel = 0.0f;
 			g_sway.moveX = 0.0f;
+			g_sway.crouch = g_sway.crouchVel = 0.0f;
 			g_sway.init = true;
 		}
 		const float dH = WrapPi(h - g_sway.lastH), dP = p - g_sway.lastP;
@@ -1629,23 +1639,33 @@ static void UpdateGunSway()
 
 		// Jump and land: the arms dip and spring back (instead of the first person jump animations).
 		if (c.smoothJump) {
-			constexpr float kW = 2.0f * kPi / 0.45f;  // spring: about 0.45 s per bounce
 			if (state != g_sway.airState) {
 				if (g_cfg.debug) Log("gun sway: jump state %d -> %d (%.2f s in the air)", g_sway.airState, state, g_sway.airTime);
 				if (g_sway.airState == 0 && state == 1) {        // took off
-					g_sway.dipVel += c.jumpDip * kW * 1.6f;
+					g_sway.dipVel += c.jumpDip * kDipW * 1.6f;
 					g_sway.jumped = true;
 				} else if (g_sway.airState != 0 && state == 0 &&  // landed: harder the longer the fall.
 				           (g_sway.jumped || g_sway.airTime > 0.35f)) {
 					// (Not after a moment in the air without a jump: stairs and bumps are a short
 					// "fall" each step.)
-					g_sway.dipVel += c.landDip * kW * 1.6f * std::fmin(1.5f, std::fmax(0.3f, g_sway.airTime));
+					g_sway.dipVel += c.landDip * kDipW * 1.6f * std::fmin(1.5f, std::fmax(0.3f, g_sway.airTime));
 				}
 				if (state == 0) { g_sway.airTime = 0.0f; g_sway.jumped = false; }
 				g_sway.airState = state;
 			}
 			if (state != 0) g_sway.airTime += (float)dt;
-			const float acc = -kW * kW * g_sway.dip - 2.0f * 0.55f * kW * g_sway.dipVel;
+		}
+
+		// Crouched: the gun sits a little lower and further left until the player stands up again,
+		// easing in and out along with the view (which vanilla eases over ~0.4 s).
+		{
+			const bool sneaking = (PlayerMoveFlags() & kMove_Sneak) != 0;
+			g_sway.crouch = SmoothDamp(g_sway.crouch, sneaking ? 1.0f : 0.0f, &g_sway.crouchVel, dt, 0.15f);
+		}
+
+		// The dip spring (jump, landing): about 0.45 s per bounce, settling quickly.
+		{
+			const float acc = -kDipW * kDipW * g_sway.dip - 2.0f * 0.55f * kDipW * g_sway.dipVel;
 			g_sway.dipVel += acc * (float)dt;
 			g_sway.dip += g_sway.dipVel * (float)dt;
 		}
@@ -1673,8 +1693,8 @@ static void UpdateGunSway()
 			// through a little extra smoothing.
 			const bool stepAir = state != 0 && c.smoothJump && !g_sway.jumped && g_sway.airTime < 0.3f;
 			if (!stepAir) g_sway.moveX += (lateral - g_sway.moveX) * std::fmin(1.0f, (float)dt / 0.1f);
-			const float target = -c.strafeShift * std::fmax(-1.3f, std::fmin(1.3f, g_sway.moveX / kRunSpeed));
-			g_sway.strafe = SmoothDamp(g_sway.strafe, target, &g_sway.strafeVel, dt, 0.15f);
+			const float rel = std::fmax(-1.3f, std::fmin(1.3f, g_sway.moveX / kRunSpeed));
+			g_sway.strafe = SmoothDamp(g_sway.strafe, -c.strafeShift * rel, &g_sway.strafeVel, dt, 0.15f);
 		}
 
 		// Fade: first person with the weapon out, not aiming down the sights, not in a menu or VATS.
@@ -1708,8 +1728,9 @@ static void ApplyGunSwayTo(NiAVObject* node)
 	// A smooth dip per step, down and back up (0 at the start and end of each step), swaying to
 	// one side and then the other: furthest out at the bottom of each dip.
 	const float step = g_sway.stepAmp * 0.5f * (1.0f - std::cos(2.0f * kPi * g_sway.stepPhase));
-	const float side = (c_stepSide() * g_sway.stepAmp * std::sin(kPi * g_sway.stepPhase) + g_sway.strafe) * g_sway.weight;
-	const float dip = (g_sway.dip + step) * g_sway.weight;
+	const float side = (c_stepSide() * g_sway.stepAmp * std::sin(kPi * g_sway.stepPhase) + g_sway.strafe -
+	                    g_sway.crouch * g_cfg.sway.crouchLeft) * g_sway.weight;
+	const float dip = (g_sway.dip + step + g_sway.crouch * g_cfg.sway.crouchDip) * g_sway.weight;
 	const float oh = g_sway.oh, op = g_sway.op + dip * 0.6f * kDegToRad;  // dipping tilts the gun down a bit
 	if (std::fabs(oh) < 1e-5f && std::fabs(op) < 1e-5f && std::fabs(dip) < 1e-3f && std::fabs(side) < 1e-3f) return;
 	const NiMatrix3& B = g_sway.root->world.rot;
@@ -1719,6 +1740,8 @@ static void ApplyGunSwayTo(NiAVObject* node)
 	const float cp = std::cos(g_sway.pitch), sp = std::sin(g_sway.pitch);
 	const NiPoint3 up = { bodyUp.x * cp + fwd.x * sp, bodyUp.y * cp + fwd.y * sp, bodyUp.z * cp + fwd.z * sp };
 	// Heading to the right is clockwise about up; pitch down is about -right.
+	// (Rolling the gun into strafes and against turns, and an idle drift, were tried and removed,
+	// 2026-10-12; the vanilla idle breathing stays, it is the wobble the crosshair shows.)
 	const NiMatrix3 R = MatMul(AxisAngle(up, -oh), AxisAngle(right, -op));
 	const NiPoint3 c = g_sway.head->world.pos;
 	const NiPoint3 d = { node->world.pos.x - c.x, node->world.pos.y - c.y, node->world.pos.z - c.z };
