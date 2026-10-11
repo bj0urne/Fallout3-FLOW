@@ -28,7 +28,7 @@ Everything is done in the engine at runtime: no custom skeleton, no animation re
 ### First person
 - **Gun sway:** the arms and gun trail a little behind the view and float back, easing out instead of stopping hard. Moving sideways, the gun glides a little the other way. The sway looks the same at any pitch and fades out when aiming down the sights, in menus and in VATS.
 - **Smooth jumps:** the vanilla jump and land weapon shake is replaced by a soft dip that springs back. Longer falls dip more.
-- **Smooth steps:** the vanilla walk/run weapon bob is replaced by a soft dip per step that sways to alternating sides. It is quicker and deeper the faster you move, with the game's own footstep sound where each foot lands.
+- **Smooth steps:** the vanilla walk/run weapon bob is replaced by a soft rise per step that sways to alternating sides. It is quicker and higher the faster you move, with the game's own footstep sound where each foot lands.
 - **Steady gun when looking up and down:** vanilla shifts the weapon on screen as you pitch the view; FCCO keeps it in place.
 - **Crouch pose:** while crouched, the gun eases back toward you and a little lower, and returns when you stand up.
 - **Vertical slide:** going up stairs, ledges or a jump, the gun slides down a little; coming down or falling, it floats up until you land.
@@ -75,7 +75,7 @@ Addresses are for `Fallout3.exe` 1.7.0.3.
 - **Camera:** the third person camera's final `NiAVObject::Update` call (`0x0077E538`) is redirected for the shoulder swap and the vanity orbit fix.
 - **Crosshair:** drawn in a Direct3D 9 overlay (`IDirect3D9::CreateDevice` → device and swap chain `Present`/`Reset`). The vanilla HUD crosshair is hidden while it shows. The spread comes from the same weapon data and settings the game uses for its cone and wobble.
 - **Shots:** the call to `Projectile::Create` at `0x004BF017` is redirected, and the player's shots get their start point and angles from the crosshair line.
-- **First person:** the arms are turned about the head after the first person skeleton (`PlayerCharacter+0x5F0`) updates. Jump and walk/run animations on that skeleton are skipped in `AnimData::PlayAnimGroup` (`0x00461690`). The character controller's state drives the jump dip, and the ground speed drives the step dip. The walk animations' footstep text keys (`Enum: Left/Right`) are replaced by direct calls to the footstep function (`0x006C53A0`). The pitch shift comes from `fFirstPersonHandFollowMult` (vanilla 0.85), which FCCO holds at 1.
+- **First person:** the arms are turned about the head after the first person skeleton (`PlayerCharacter+0x5F0`) updates. Jump and walk/run animations on that skeleton are skipped in `AnimData::PlayAnimGroup` (`0x00461690`). The character controller's state drives the jump dip, and the ground speed drives the step bob. The walk animations' footstep text keys (`Enum: Left/Right`) are replaced by direct calls to the footstep function (`0x006C53A0`). The pitch shift comes from `fFirstPersonHandFollowMult` (vanilla 0.85), which FCCO holds at 1.
 
 ## Development and AI disclosure
 

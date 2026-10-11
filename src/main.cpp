@@ -296,7 +296,7 @@ struct GunSwayConfig {
 	float jumpDip = 1.5f;    // units the arms dip when jumping
 	float landDip = 3.0f;    // ...and when landing after about a second in the air
 	bool  smoothSteps = true; // no first person walk/run animations; a soft dip per step instead
-	float stepDip = 0.6f;    // units the arms dip per step when running (walking: less)
+	float stepDip = 0.6f;    // units the arms rise per step when running (walking: less)
 	float stepSway = 0.5f;   // ...and sway to the side (alternating each step)
 	float strafeShift = 2.0f; // units the gun glides against sideways movement (at running speed)
 	float crouchBack = 4.0f;  // units the gun is pulled back toward the view while crouched
@@ -1759,9 +1759,10 @@ static float c_stepSide() { return g_cfg.sway.stepDip > 1e-3f ? g_cfg.sway.stepS
 
 static void ApplyGunSwayTo(NiAVObject* node)
 {
-	// A smooth dip per step, down and back up (0 at the start and end of each step), swaying to
-	// one side and then the other: furthest out at the bottom of each dip.
-	const float step = g_sway.stepAmp * 0.5f * (1.0f - std::cos(2.0f * kPi * g_sway.stepPhase));
+	// A smooth bob per step, up and back down (0 at the start and end of each step; the user
+	// preferred it rising rather than dipping), swaying to one side and then the other: furthest
+	// out at the top of each bob.
+	const float step = -g_sway.stepAmp * 0.5f * (1.0f - std::cos(2.0f * kPi * g_sway.stepPhase));
 	const float side = (c_stepSide() * g_sway.stepAmp * std::sin(kPi * g_sway.stepPhase) + g_sway.strafe -
 	                    g_sway.crouch * g_cfg.sway.crouchLeft) * g_sway.weight;
 	const float dip = (g_sway.dip + step + g_sway.crouch * g_cfg.sway.crouchDip + g_sway.vert) * g_sway.weight;
