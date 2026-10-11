@@ -81,3 +81,7 @@ FCCO was developed with **Claude (Anthropic)**, which did the reverse engineerin
 - The FOSE team, for the Fallout Script Extender
 - lStewieAl, for the Fallout Anniversary Patcher
 - Drarack's *Diagonal Movement*, which inspired the leg turning
+
+## License
+
+[MIT](LICENSE)
