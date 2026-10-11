@@ -1,39 +1,28 @@
 # FLOW (Gameplay Overhaul)
 
-A [FOSE](https://fose.silverlock.org/) plugin for **Fallout 3** that reworks how the player moves, aims and looks. In third person the legs, body and camera move naturally. Shots go where the crosshair points. First person gets weapon inertia like in Half-Life 2.
+A [FOSE](https://fose.silverlock.org/) plugin for **Fallout 3** that reworks how the player moves, aims and looks. In third person the legs, body and camera move naturally. Shots go where the crosshair points. First person gets weapon inertia like modern games.
 
 Everything is done in the engine at runtime: no custom skeleton, no animation replacers, no ESP and no scripts. Every feature can be switched off or tuned in `FLOW.ini`.
 
 ## Features
 
 ### Third person movement
-- **Diagonal movement:** the legs face the direction you're moving instead of running straight ahead while the body slides sideways. This includes backward diagonals and a full 360° with a controller stick.
-- **Strafing with a weapon drawn:** plays the forward walk or run with the legs turned to the side, so the torso animation and your aim never change.
-- **Turn in place:** the feet stay planted while you turn, then the legs pivot round to catch up, with the game's stepping animation.
-- **Free look (weapon holstered):** the camera orbits freely while you stand still and the head follows it; moving turns the body to face the camera.
-- **Leg and torso lag:** while turning on the move, the legs (and, with the weapon holstered, the torso) trail slightly behind. At full speed you lean into turns.
-- **Acceleration:** starting, stopping and changing speed ease in and out (first and third person).
-- **No landing stumble:** landing from a jump or a fall plays no stumble animation and never holds you in place: you can move, turn or jump again the moment you touch the ground. The landing sound still plays.
-- **Waist twist:** the twist between legs and torso is spread up the spine instead of all at the hips.
-
-### Camera (third person)
-- Vertical lag: the camera follows your height with a soft spring, so on a jump you rise and drop ahead of it; stairs and bumps are softened too. Mouse look is never smoothed.
-- Smooth view switch: switching between first and third person glides the camera out of your eyes to the third person spot and back in, easing in and out. Pressing the key again mid-glide turns it round smoothly.
-- Smooth wheel zoom: each mouse wheel step glides to the new distance instead of jumping.
-- Shoulder swap on a key (middle mouse button by default).
-- The vanity camera (holding the POV key) keeps the player on the same side of the screen, and the mouse turns it like normal aiming.
-
-### Crosshair and aiming
-- **Dynamic crosshair:** the game's own crosshair, split in two, opens up to show your gun's actual spread. The spread includes weapon accuracy, condition, skill, crippled limbs, aiming, crouching, moving and perks. Drawing a gun opens it out to your spread and fades in the centre dot; holstering closes it again. With no gun drawn it replaces the vanilla crosshair, closed and without the dot. Every shot pulls it in toward the centre and back out. It closes while you reload, and stays closed through a reload jam (FLOW waits for the game's jam roll). It hides in scopes, in VATS and when you die. There's also a four-line style, with colour, size and outline options.
-- **Shots follow the crosshair:** in third person, bullets normally leave the gun beside the camera and miss what the crosshair is on up close. In first person, a railing in front of the gun but not in front of your eyes stops them. FLOW starts each shot on the crosshair line, level with the gun, so it hits what the crosshair shows. Spread is kept and VATS is untouched.
+- **Natural movement:** your body faces the direction you're moving. Turning while moving makes you lean into turns and your body lags behind slightly to give a natural feeling to movement. With a weapon drawn, turning around while still only turns your torso, until you turn far enough at which your legs also turn.
+- **Vertical smoothness:** the camera follows your height with a smooth delay, so on a jump you rise and drop ahead of it.
+- **Free look (weapon holstered):** camera can be moved around freely, and your character moves his head to look at what you're aiming at. Camera now naturally orbits the player instead of orbiting the crosshair as in the vanilla game, finally fixing vanity camera.
+- **Acceleration:** movement easing. Starting and stopping is smooth.
+- **No clunky movement:** landing hard no longer locks you into a stumble animation. You're free to land and instantly move.
+- **Shoulder swap** you can now swap shoulder for the camera in third person on a key (X by default).
 
 ### First person
-- **Gun sway:** the arms and gun trail a little behind the view and float back, easing out instead of stopping hard. Moving sideways, the gun glides a little the other way. The sway looks the same at any pitch and fades out when aiming down the sights, in menus and in VATS.
-- **Smooth jumps:** the vanilla jump and land weapon shake is replaced by a soft dip that springs back. Longer falls dip more.
-- **Smooth steps:** the vanilla walk/run weapon bob is replaced by a soft rise per step that sways to alternating sides. It is quicker and higher the faster you move, with the game's own footstep sound where each foot lands.
-- **Steady gun when looking up and down:** vanilla shifts the weapon on screen as you pitch the view; FLOW keeps it in place.
-- **Crouch pose:** while crouched, the gun eases back toward you and a little lower, and returns when you stand up.
-- **Vertical slide:** going up stairs, ledges or a jump, the gun slides down a little; coming down or falling, it floats up until you land.
+- **Gun sway system:** this mod features a sway system for your first person viewmodels. Looking around moves the weapon like it actually weighs something, moving bobs the weapon using the same sway system, and jumping/landing dips the weapon to give a sense of weight. All of these combined using the same system make gunplay weel much more fluid than the base game. 
+
+### Crosshair and aiming
+- **Dynamic crosshair:** the game's own crosshair, split in two, opens up to show your gun's actual spread. The spread includes weapon accuracy, condition, skill, crippled limbs, aiming, crouching, moving and perks. Drawing a gun opens it out to your spread and fades in the centre dot; holstering closes it again. Every shot pulls it in toward the centre and back out to give a responsive feel.
+- **Shots follow the crosshair:** now bullets actually hit what you're aiming at, New Vegas style. In the vanilla game bullets originated from the barrel of your gun, which resulted in bullets hitting walls, objects etc in front of your gun while your crosshair was clearly on a mutants head.
+
+### Other
+- POV: manupulating your POV is now smoother than ever.
 
 Every patch site is checked byte for byte before anything is written. On a mismatch, FLOW logs the reason and leaves that feature vanilla.
 
