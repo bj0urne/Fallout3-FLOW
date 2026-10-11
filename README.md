@@ -17,7 +17,7 @@ Everything is done in the engine at runtime: no custom skeleton, no animation re
 - **Waist twist:** the twist between legs and torso is spread up the spine instead of all at the hips.
 
 ### Camera (third person)
-- Smoothed vertical follow, so stairs, landings and bumps don't jolt the view. Mouse rotation is never smoothed.
+- **Stair smoothing (both views):** stairs, rocks and kerbs no longer jolt the view each step. The camera, and in first person the arms, ease up or down to each new height: quicker when running, longer when walking. Jumps and falls are not smoothed, and mouse rotation never is.
 - Shoulder swap on a key (middle mouse button by default).
 - The vanity camera (holding the POV key) keeps the player on the same side of the screen.
 
@@ -70,7 +70,8 @@ Addresses are for `Fallout3.exe` 1.7.0.3.
 - **Bones:** `NiAVObject::UpdateWorldData` (vtable slot `0xB8`) is replaced in the NiNode vtable. Right after the engine computes the player's bone world transforms (after the animation, every frame), FCCO turns the pelvis, spine, head and the whole body. Nothing overwrites these changes, so no custom skeleton is needed.
 - **Movement:** the player's movement flags (`PlayerMover::SetMovementFlags`, vtable `+0x0C`) pick the animation. The root-motion vector call at `0x007E89ED` and `Actor::Move` (PlayerCharacter vtable `+0x250`) carry strafe-as-run, controller 360° movement and acceleration.
 - **Landing:** the player's landing animation (JumpLand and its directions) is started and its animation slot is ended at once with the game's own slot reset (`0x0045DB50`). The game then starts the movement it had queued for after the landing.
-- **Camera:** the third person camera's final `NiAVObject::Update` call (`0x0077E538`) is redirected for follow smoothing, the shoulder swap and the vanity orbit fix.
+- **Camera:** the third person camera's final `NiAVObject::Update` call (`0x0077E538`) is redirected for the shoulder swap and the vanity orbit fix.
+- **Stairs:** while on the ground (or briefly in the air without a jump, as when stepping down), the player's height changes are held back and eased in, by shifting the third person body's 3D root and the first person skeleton root. Only their world-space update is shifted; the first person skeleton is also updated in a camera-relative space, which already follows the camera. The third person camera hangs from a node in the body, so it follows the eased body by itself.
 - **Crosshair:** drawn in a Direct3D 9 overlay (`IDirect3D9::CreateDevice` → device and swap chain `Present`/`Reset`). The vanilla HUD crosshair is hidden while it shows. The spread comes from the same weapon data and settings the game uses for its cone and wobble.
 - **Shots:** the call to `Projectile::Create` at `0x004BF017` is redirected, and the player's shots get their start point and angles from the crosshair line.
 - **First person:** the arms are turned about the head after the first person skeleton (`PlayerCharacter+0x5F0`) updates. Jump and walk/run animations on that skeleton are skipped in `AnimData::PlayAnimGroup` (`0x00461690`). The character controller's state drives the jump dip, and the ground speed drives the step dip. The walk animations' footstep text keys (`Enum: Left/Right`) are replaced by direct calls to the footstep function (`0x006C53A0`). The pitch shift comes from `fFirstPersonHandFollowMult` (vanilla 0.85), which FCCO holds at 1.
