@@ -37,7 +37,7 @@
 
 #define PLUGIN_NAME        "FCCO"
 #define PLUGIN_VERSION     1
-#define PLUGIN_VERSION_STR "0.1.0"
+#define PLUGIN_VERSION_STR "1.0.0"
 
 // ---------------------------------------------------------------------------------------------
 // FOSE plugin interface (subset of fose/PluginAPI.h)
@@ -265,6 +265,7 @@ struct CameraConfig {               // times in seconds
 	bool  vanityFix     = true;     // vanity camera orbits keep the player on the same screen side
 	float viewSwitch    = 0.35f;    // first <-> third person: the camera glides between the eyes and
 	                                // the third person spot in this long, eased (0 = vanilla)
+	float zoomSmooth    = 0.15f;    // mouse wheel zoom: each step glides over about this long (0 = vanilla)
 };
 
 struct CrosshairConfig {
@@ -519,7 +520,9 @@ static void LoadConfig()
 	clampf(c.shoulderTime, 0.0f, 3.0f);
 	c.viewSwitch    = IniFloat(path, "Camera", "fViewSwitchMs", c.viewSwitch * 1000.0f) / 1000.0f;
 	clampf(c.viewSwitch, 0.0f, 2.0f);
-	Log("config: Camera: fViewSwitchMs=%.0f", c.viewSwitch * 1000.0f);
+	c.zoomSmooth    = IniFloat(path, "Camera", "fZoomSmoothMs", c.zoomSmooth * 1000.0f) / 1000.0f;
+	clampf(c.zoomSmooth, 0.0f, 2.0f);
+	Log("config: Camera: fViewSwitchMs=%.0f fZoomSmoothMs=%.0f", c.viewSwitch * 1000.0f, c.zoomSmooth * 1000.0f);
 	Log("config: Camera: bEnabled=%d fVerticalLagMs=%.0f bVanityOrbitFix=%d bShoulderSwap=%d iShoulderSwapKey=0x%X "
 	    "fShoulderSwapMs=%.0f", c.enabled, c.vertLag * 1000.0f, c.vanityFix, c.shoulderSwap, c.shoulderKey,
 	    c.shoulderTime * 1000.0f);
@@ -2112,6 +2115,31 @@ static struct PovState {
 	bool     released = false;      // glide in done: the game may switch
 } pov;
 
+// Mouse wheel zoom: the wheel changes the third person zoom (0x107BDBC) in steps (each about a
+// sixth of the distance) and the camera follows at once. The camera's two reads of it (0x77DD9B,
+// 0x77DE15) are pointed at g_zoomSmooth instead, which glides after the real value; the wheel,
+// its switch into first person and everything else keep using the real one.
+static float   g_zoomSmooth, g_zoomVel;
+static bool    g_zoomHooked;
+static int64_t g_zoomQpc;
+static void UpdateZoomSmooth()
+{
+	if (!g_zoomHooked) return;
+	const float real = *(float*)0x0107BDBC;
+	const int64_t now = QpcNow();
+	double dt = g_zoomQpc ? (double)(now - g_zoomQpc) / g_qpcFreq : 0.0;
+	g_zoomQpc = now;
+	if (dt > 0.1) dt = 0.1;
+	uint8_t* pc = (uint8_t*)Player();
+	// first person (settled), or no sensible value yet: follow exactly
+	if (!pc || (!pc[0x5A8] && !pc[0x5AA]) || !(g_zoomSmooth > 1.0f) || !std::isfinite(real)) {
+		g_zoomSmooth = real;
+		g_zoomVel = 0.0f;
+		return;
+	}
+	g_zoomSmooth = SmoothDamp(g_zoomSmooth, real, &g_zoomVel, dt, g_cfg.cam.zoomSmooth * 0.5f);
+}
+
 // Every frame in first person: where the eyes are (the first person camera node), relative to
 // the player, in the player's heading frame.
 static void PovRecordEye()
@@ -2240,6 +2268,7 @@ static void __fastcall Hook_CameraUpdate(NiAVObject* node, void* /*edx*/, void* 
 	// Death/knockdown camera stays vanilla (it follows the ragdoll).
 	if (node && InThirdPerson() && !PlayerRagdollReason()) SmoothCamera(node, dt);
 	else cam.init = false;
+	UpdateZoomSmooth();  // the wheel was read earlier this frame; the camera uses it next frame
 	if (node && g_cfg.cam.viewSwitch > 0.0f) PovTransition(node, dt);
 	((NiAVObjectUpdate_t)addr::kNiAVObjectUpdate)(node, updateData);
 }
@@ -3570,6 +3599,24 @@ __declspec(dllexport) bool FOSEPlugin_Load(const FOSEInterface* fose)
 			VirtualProtect((void*)at, 5, old, &old);
 			FlushInstructionCache(GetCurrentProcess(), (void*)at, 5);
 			Log("hooked third person camera update at %08X", (unsigned)at);
+			if (g_cfg.cam.zoomSmooth > 0.0f) {
+				// fdivr dword ptr [0x107BDBC] / fld dword ptr [0x107BDBC] in the third person camera
+				const uint8_t a[] = { 0xD8, 0x3D, 0xBC, 0xBD, 0x07, 0x01 }, b[] = { 0xD9, 0x05, 0xBC, 0xBD, 0x07, 0x01 };
+				if (memcmp((const void*)0x0077DD9B, a, 6) == 0 && memcmp((const void*)0x0077DE15, b, 6) == 0) {
+					g_zoomSmooth = *(float*)0x0107BDBC;
+					for (uintptr_t at2 : { (uintptr_t)0x0077DD9B, (uintptr_t)0x0077DE15 }) {
+						DWORD old;
+						VirtualProtect((void*)at2, 6, PAGE_EXECUTE_READWRITE, &old);
+						*(float**)(at2 + 2) = &g_zoomSmooth;
+						VirtualProtect((void*)at2, 6, old, &old);
+						FlushInstructionCache(GetCurrentProcess(), (void*)at2, 6);
+					}
+					g_zoomHooked = true;
+					Log("smooth wheel zoom: camera zoom reads at 0077DD9B/0077DE15 redirected");
+				} else {
+					Log("WARNING: camera zoom reads do not match; wheel zoom stays vanilla");
+				}
+			}
 			if (g_cfg.cam.viewSwitch > 0.0f) {
 				const uintptr_t sites[2] = { 0x0078A4BE, 0x0078A5AA };
 				void* const fns[2] = { (void*)&Hook_PovKeyPress, (void*)&Hook_PovKeyRelease };
