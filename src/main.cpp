@@ -1,5 +1,6 @@
-// STRIDE - FOSE plugin for Fallout 3 (1.7.0.3) that makes the player's third person legs move
-// more naturally. The upper body (aim, weapon, camera) is never affected.
+// FCCO (Fallout Character Controller Overhaul) - FOSE plugin for Fallout 3 (1.7.0.3): third person
+// movement, camera and crosshair, and first person gun sway. It started with making the player's
+// third person legs move more naturally (the upper body, aim and camera are never affected):
 //   Diagonal:     when moving diagonally, the legs face the direction of travel instead of running
 //                 straight ahead while the body slides sideways.
 //   Turn in place: when standing still and turning, the feet stay planted until the twist gets
@@ -34,7 +35,7 @@
 #include <cstring>
 #include <vector>
 
-#define PLUGIN_NAME        "STRIDE"
+#define PLUGIN_NAME        "FCCO"
 #define PLUGIN_VERSION     1
 #define PLUGIN_VERSION_STR "0.1.0"
 
@@ -200,7 +201,7 @@ static_assert(offsetof(NiNode, children) == 0xA0, "children");
 static_assert(offsetof(NiNode, firstFree) == 0xA6, "firstFree");
 
 // ---------------------------------------------------------------------------------------------
-// Config (Data\FOSE\Plugins\STRIDE.ini)
+// Config (Data\FOSE\Plugins\FCCO.ini)
 
 constexpr float kPi       = 3.14159265f;
 constexpr float kDegToRad = kPi / 180.0f;
@@ -1380,7 +1381,7 @@ static void __fastcall Hook_SetMovementFlags(void* mover, void* /*edx*/, uint32_
 	// Weapon drawn, pure strafe: tell the game "forward" so it plays the forward walk/run instead
 	// of the strafe animation; the legs are then turned 90 degrees (TargetAngle) and the movement
 	// vector is turned to match (Hook_AnimMoveVector). The real keys are kept in g.strafeKeys so
-	// the rest of STRIDE still sees a strafe.
+	// the rest of FCCO still sees a strafe.
 	const uint32_t dir = flags & kMove_Direction;
 	const bool pureStrafe = (dir == kMove_Left || dir == kMove_Right);
 	g.strafeKeys = 0;
@@ -1615,7 +1616,7 @@ static void ApplyGunSwayTo(NiAVObject* node)
 // First person jump/land animations are skipped (the dip above replaces their shake): the hook
 // at AnimData::PlayAnimGroup returns "nothing played" for jump groups on the first person
 // skeleton's animation data.
-extern "C" bool __cdecl STRIDE_SkipAnimGroup(uint8_t* animData, uint32_t groupId)
+extern "C" bool __cdecl FCCO_SkipAnimGroup(uint8_t* animData, uint32_t groupId)
 {
 	if (!g_cfg.sway.enabled || !g_cfg.sway.smoothJump || !animData) return false;
 	const uint32_t g = groupId & 0xFF;
@@ -1632,15 +1633,15 @@ extern "C" bool __cdecl STRIDE_SkipAnimGroup(uint8_t* animData, uint32_t groupId
 	return first;
 }
 
-extern "C" void STRIDE_PlayAnimGroupStub();
+extern "C" void FCCO_PlayAnimGroupStub();
 __asm__(
 	".text\n"
-	".globl _STRIDE_PlayAnimGroupStub\n"
-	"_STRIDE_PlayAnimGroupStub:\n"
+	".globl _FCCO_PlayAnimGroupStub\n"
+	"_FCCO_PlayAnimGroupStub:\n"
 	"	pushl %ecx\n"
 	"	pushl 8(%esp)\n"            // group id
 	"	pushl %ecx\n"               // animation data
-	"	call _STRIDE_SkipAnimGroup\n"
+	"	call _FCCO_SkipAnimGroup\n"
 	"	addl $8, %esp\n"
 	"	popl %ecx\n"
 	"	testb %al, %al\n"
@@ -2933,7 +2934,7 @@ __declspec(dllexport) bool FOSEPlugin_Load(const FOSEInterface* fose)
 			DWORD old;
 			VirtualProtect((void*)at, 5, PAGE_EXECUTE_READWRITE, &old);
 			*(uint8_t*)at = 0xE9;
-			*(int32_t*)(at + 1) = (int32_t)((uintptr_t)&STRIDE_PlayAnimGroupStub - (at + 5));
+			*(int32_t*)(at + 1) = (int32_t)((uintptr_t)&FCCO_PlayAnimGroupStub - (at + 5));
 			VirtualProtect((void*)at, 5, old, &old);
 			FlushInstructionCache(GetCurrentProcess(), (void*)at, 5);
 			Log("hooked AnimData::PlayAnimGroup at %08X (first person jump animations replaced by a dip)", (unsigned)at);
@@ -2950,7 +2951,7 @@ __declspec(dllexport) bool FOSEPlugin_Load(const FOSEInterface* fose)
 		const uint8_t dead[] = { 0x80, 0x7C, 0x24, 0x04, 0x00, 0x8B, 0x81, 0xFC, 0x00, 0x00, 0x00 };
 		g_lifeStateOk = memcmp((const void*)addr::kIsDead, dead, sizeof(dead)) == 0;
 		if (!g_lifeStateOk)
-			Log("WARNING: Actor::IsDead does not match; STRIDE cannot tell when the player dies");
+			Log("WARNING: Actor::IsDead does not match; FCCO cannot tell when the player dies");
 	}
 
 	if (g_cfg.xh.enabled) {
