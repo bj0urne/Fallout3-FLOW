@@ -15,7 +15,7 @@ Everything is done in the engine at runtime: no custom skeleton, no animation re
 - **Shoulder swap** you can now swap shoulder for the camera in third person on a key (X by default).
 
 ### First person
-- **Gun sway system:** this mod features a sway system for your first person viewmodels. Looking around moves the weapon like it actually weighs something, moving bobs the weapon using the same sway system, and jumping/landing dips the weapon to give a sense of weight. All of these combined using the same system make gunplay weel much more fluid than the base game. 
+- **Gun sway system:** this mod features a sway system for your first person viewmodels. Looking around moves the weapon like it actually weighs something, moving bobs the weapon using the same sway system, and jumping/landing dips the weapon to give a sense of weight. All of these combined using the same system make gunplay feel much more fluid than the base game. 
 
 ### Crosshair and aiming
 - **Dynamic crosshair:** the game's own crosshair, split in two, opens up to show your gun's actual spread. The spread includes weapon accuracy, condition, skill, crippled limbs, aiming, crouching, moving and perks. Drawing a gun opens it out to your spread and fades in the centre dot; holstering closes it again. Every shot pulls it in toward the centre and back out to give a responsive feel.
