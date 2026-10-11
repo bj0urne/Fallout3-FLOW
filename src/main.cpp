@@ -79,6 +79,10 @@ namespace addr {
 	// Plays an actor's footstep sound (cdecl(actor, foot), foot 0 left, 1 right, 2/3 back left/right):
 	// what the animation text keys "Enum: Left/Right" call (text key dispatch 0x54C29E).
 	constexpr uintptr_t kPlayFootstep       = 0x006C53A0;
+	// AnimData slot reset (thiscall(sequence type, float blend), ret 8): deactivates the slot's
+	// sequence and clears its current and queued group (+0x4C / +0x9C), +0xE0 sequence
+	constexpr uintptr_t kAnimResetSlot      = 0x0045DB50;
+	constexpr uintptr_t kAnimGroupTable     = 0x00F5ACA0;  // 0x24-byte entries: name, +0x08 sequence type (slot), ...
 	constexpr uintptr_t kFrameDelta         = 0x01090BAC;  // main TimeGlobal frame delta (game seconds), as used by 0x45D370
 	constexpr uintptr_t kActorMove          = 0x00709320;  // Actor::Move, vtable +0x250
 	constexpr uintptr_t kSlotActorMove      = 0x250;
@@ -248,6 +252,7 @@ struct MoveConfig {                 // angles in radians, times in seconds
 	bool  accel         = true;                 // ease into / out of movement
 	float accelTime     = 0.06f;
 	float decelTime     = 0.06f;
+	bool  noLandStumble = true;                 // landing: no landing animation, move on right away
 };
 
 struct CameraConfig {               // times in seconds
@@ -401,6 +406,7 @@ static void LoadConfig()
 	m.accel         = b("Moving", "bAcceleration", m.accel);
 	m.accelTime     = IniFloat(path, "Moving", "fAccelerationMs", m.accelTime * 1000.0f) / 1000.0f;
 	m.decelTime     = IniFloat(path, "Moving", "fDecelerationMs", m.decelTime * 1000.0f) / 1000.0f;
+	m.noLandStumble = b("Moving", "bNoLandingStumble", m.noLandStumble);
 
 	GunSwayConfig& gs = g_cfg.sway;
 	gs.enabled = b("GunSway", "bEnabled", gs.enabled);
@@ -528,8 +534,8 @@ static void LoadConfig()
 	    "fLeanPer100DegPerSec=%.2f fLeanTimeMs=%.0f",
 	    m.legLag, m.torsoLag, m.legLagMax * kRadToDeg, m.legLagTime * 1000.0f, m.lean, m.leanMax * kRadToDeg,
 	    m.leanPerTurn * 100.0f, m.leanTime * 1000.0f);
-	Log("config: Moving: bAcceleration=%d fAccelerationMs=%.0f fDecelerationMs=%.0f", m.accel,
-	    m.accelTime * 1000.0f, m.decelTime * 1000.0f);
+	Log("config: Moving: bAcceleration=%d fAccelerationMs=%.0f fDecelerationMs=%.0f bNoLandingStumble=%d", m.accel,
+	    m.accelTime * 1000.0f, m.decelTime * 1000.0f, m.noLandStumble);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1698,6 +1704,26 @@ static void* __fastcall Hook_PlayAnimGroup(uint8_t* animData, void* /*edx*/, uin
 {
 	const PlayAnimGroup_t orig = (PlayAnimGroup_t)(uintptr_t)&FCCO_PlayAnimGroupOrig;
 	const uint32_t g = groupId & 0xFF;
+	// Landing (JumpLand and its directions) on the player's body: it starts, and its slot is ended
+	// right away with the game's own slot reset (AnimData 0x45DB50, as when an animation finishes).
+	// The game then starts the movement it queued for after the landing, or picks idle/walk/run,
+	// on the next frame. (Skipping or replacing the landing left the game stuck in it, asking again
+	// every frame with the landing sound; playing it faster did not help: the slot is only cleared
+	// on the game's own clock, at the landing's normal length.) The landing sound is played when the
+	// landing is chosen, so it still plays once.
+	if (g_cfg.move.noLandStumble && animData && now && (g == 170 || (g >= 179 && g <= 182)) &&
+	    *(NiAVObject**)(animData + 8) == PlayerRoot()) {
+		void* const r = orig(animData, groupId, now, a3, a4);
+		// the group's sequence type is its slot (JumpLand*: 1, movement; as in PlayAnimGroup, 20 -> 1, 21 -> 4)
+		const uint32_t type = *(uint32_t*)(addr::kAnimGroupTable + 0x08 + g * 0x24);
+		const uint32_t slot = type == 20 ? 1 : type == 21 ? 4 : type;
+		if (slot < 8) ((void(__thiscall*)(void*, uint32_t, float))addr::kAnimResetSlot)(animData, slot, 0.1f);
+		if (g_cfg.debug) {
+			static int n;
+			if (n++ < 6) Log("landing: group %u started and its slot %u (type %u) ended (sequence %p)", g, slot, type, r);
+		}
+		return r;
+	}
 	const bool jump = g_cfg.sway.smoothJump &&
 	                  ((g >= 168 && g <= 170) || (g >= 174 && g <= 177) || (g >= 179 && g <= 182));
 	const bool walk = g_cfg.sway.smoothSteps && g >= 3 && g <= 10;  // Forward..FastRight
@@ -3001,8 +3027,15 @@ __declspec(dllexport) bool FOSEPlugin_Load(const FOSEInterface* fose)
 			Log("WARNING: footstep function does not match; first person walk animations stay vanilla");
 			g_cfg.sway.smoothSteps = false;
 		}
-		const bool wantAnimHook = g_cfg.sway.enabled && (g_cfg.sway.smoothJump || g_cfg.sway.smoothSteps);
-		if (wantAnimHook && g_swayChecksOk &&
+		if (!g_cfg.sway.enabled || !g_swayChecksOk) g_cfg.sway.smoothJump = g_cfg.sway.smoothSteps = false;
+		// mov eax,[esp+4] ; push esi ; push edi ; mov edi,eax ; sub eax,4
+		const uint8_t resetSlot[] = { 0x8B, 0x44, 0x24, 0x04, 0x56, 0x57, 0x8B, 0xF8, 0x83, 0xE8, 0x04 };
+		if (g_cfg.move.noLandStumble && memcmp((const void*)addr::kAnimResetSlot, resetSlot, sizeof(resetSlot)) != 0) {
+			Log("WARNING: animation slot reset does not match; landings stay vanilla");
+			g_cfg.move.noLandStumble = false;
+		}
+		const bool wantAnimHook = g_cfg.sway.smoothJump || g_cfg.sway.smoothSteps || g_cfg.move.noLandStumble;
+		if (wantAnimHook &&
 		    memcmp((const void*)addr::kPlayAnimGroup, playGroup, sizeof(playGroup)) == 0) {
 			const uintptr_t at = addr::kPlayAnimGroup;
 			DWORD old;
@@ -3012,10 +3045,10 @@ __declspec(dllexport) bool FOSEPlugin_Load(const FOSEInterface* fose)
 			VirtualProtect((void*)at, 5, old, &old);
 			FlushInstructionCache(GetCurrentProcess(), (void*)at, 5);
 			g_footstepOk = g_cfg.sway.smoothSteps;
-			Log("hooked AnimData::PlayAnimGroup at %08X (first person animations replaced by dips: jump %d, walk/run %d)",
-			    (unsigned)at, g_cfg.sway.smoothJump, g_cfg.sway.smoothSteps);
+			Log("hooked AnimData::PlayAnimGroup at %08X (first person animations replaced by dips: jump %d, walk/run %d; "
+			    "no landing stumble %d)", (unsigned)at, g_cfg.sway.smoothJump, g_cfg.sway.smoothSteps, g_cfg.move.noLandStumble);
 		} else if (wantAnimHook) {
-			Log("WARNING: PlayAnimGroup does not match; first person jump and walk animations stay vanilla");
+			Log("WARNING: PlayAnimGroup does not match; jump, walk and landing animations stay vanilla");
 		}
 		g_stateChecksOk = memcmp((const void*)addr::kIsWeaponOut, weapon, sizeof(weapon)) == 0 &&
 		                  memcmp((const void*)addr::kGetSittingUse, sit, sizeof(sit)) == 0 &&

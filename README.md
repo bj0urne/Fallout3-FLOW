@@ -13,6 +13,7 @@ Everything is done in the engine at runtime: no custom skeleton, no animation re
 - **Free look (weapon holstered):** the camera orbits freely while you stand still and the head follows it; moving turns the body to face the camera.
 - **Leg and torso lag:** while turning on the move, the legs (and, with the weapon holstered, the torso) trail slightly behind. At full speed you lean into turns.
 - **Acceleration:** starting, stopping and changing speed ease in and out (first and third person).
+- **No landing stumble:** landing from a jump or a fall plays no stumble animation and never holds you in place: you can move, turn or jump again the moment you touch the ground. The landing sound still plays.
 - **Waist twist:** the twist between legs and torso is spread up the spine instead of all at the hips.
 
 ### Camera (third person)
@@ -68,6 +69,7 @@ Addresses are for `Fallout3.exe` 1.7.0.3.
 
 - **Bones:** `NiAVObject::UpdateWorldData` (vtable slot `0xB8`) is replaced in the NiNode vtable. Right after the engine computes the player's bone world transforms (after the animation, every frame), FCCO turns the pelvis, spine, head and the whole body. Nothing overwrites these changes, so no custom skeleton is needed.
 - **Movement:** the player's movement flags (`PlayerMover::SetMovementFlags`, vtable `+0x0C`) pick the animation. The root-motion vector call at `0x007E89ED` and `Actor::Move` (PlayerCharacter vtable `+0x250`) carry strafe-as-run, controller 360° movement and acceleration.
+- **Landing:** the player's landing animation (JumpLand and its directions) is started and its animation slot is ended at once with the game's own slot reset (`0x0045DB50`). The game then starts the movement it had queued for after the landing.
 - **Camera:** the third person camera's final `NiAVObject::Update` call (`0x0077E538`) is redirected for follow smoothing, the shoulder swap and the vanity orbit fix.
 - **Crosshair:** drawn in a Direct3D 9 overlay (`IDirect3D9::CreateDevice` → device and swap chain `Present`/`Reset`). The vanilla HUD crosshair is hidden while it shows. The spread comes from the same weapon data and settings the game uses for its cone and wobble.
 - **Shots:** the call to `Projectile::Create` at `0x004BF017` is redirected, and the player's shots get their start point and angles from the crosshair line.
