@@ -262,6 +262,8 @@ struct CameraConfig {               // times in seconds
 	int   shoulderKey   = VK_MBUTTON;
 	float shoulderTime  = 0.167f;
 	bool  vanityFix     = true;     // vanity camera orbits keep the player on the same screen side
+	float fpStairSmooth = 0.10f;    // first person: how quickly the view catches up with step-ups/downs
+	float fpStairMax    = 24.0f;    // ...and the most it may trail (units)
 };
 
 struct CrosshairConfig {
@@ -476,12 +478,16 @@ static void LoadConfig()
 	c.shoulderSwap  = b("Camera", "bShoulderSwap", c.shoulderSwap);
 	c.shoulderKey   = GetPrivateProfileIntA("Camera", "iShoulderSwapKey", c.shoulderKey, path);
 	c.shoulderTime  = IniFloat(path, "Camera", "fShoulderSwapMs", c.shoulderTime * 1000.0f) / 1000.0f;
+	c.fpStairSmooth = IniFloat(path, "Camera", "fFirstPersonStairSmoothMs", c.fpStairSmooth * 1000.0f) / 1000.0f;
+	c.fpStairMax    = IniFloat(path, "Camera", "fFirstPersonStairMax", c.fpStairMax);
 	clampf(c.pivotSmoothZ, 0.0f, 1.0f);
 	clampf(c.shoulderTime, 0.0f, 3.0f);
+	clampf(c.fpStairSmooth, 0.0f, 1.0f);
+	clampf(c.fpStairMax, 0.0f, 100.0f);
 	Log("config: Camera: bEnabled=%d fFollowSmoothVerticalMs=%.0f bVanityOrbitFix=%d "
-	    "bShoulderSwap=%d iShoulderSwapKey=0x%X fShoulderSwapMs=%.0f",
+	    "bShoulderSwap=%d iShoulderSwapKey=0x%X fShoulderSwapMs=%.0f fFirstPersonStairSmoothMs=%.0f fFirstPersonStairMax=%.0f",
 	    c.enabled, c.pivotSmoothZ * 1000.0f, c.vanityFix,
-	    c.shoulderSwap, c.shoulderKey, c.shoulderTime * 1000.0f);
+	    c.shoulderSwap, c.shoulderKey, c.shoulderTime * 1000.0f, c.fpStairSmooth * 1000.0f, c.fpStairMax);
 
 	GetPrivateProfileStringA("Skeleton", "sBodyNode", g_cfg.bodyNode, g_cfg.bodyNode, sizeof(g_cfg.bodyNode), path);
 	g_cfg.footIKOff = b("Skeleton", "bDisableFootIKWhenTurned", g_cfg.footIKOff);
@@ -1464,6 +1470,7 @@ static struct SwayState {
 	float   dip = 0.0f, dipVel = 0.0f;     // jump/land dip: units down, springing back
 	int     airState = 0;                  // character controller: 0 ground, 1 jumping, 2 in the air
 	float   airTime = 0.0f;                // seconds off the ground
+	bool    jumped = false;                // this time off the ground started with a jump
 	NiPoint3 lastPos = {};                 // player position at the last frame (step bob speed)
 	float   speed = 0.0f;                  // smoothed ground speed, units per second
 	float   stepPhase = 0.0f;              // 0..2: a left and a right step (fraction = into this step)
@@ -1577,17 +1584,30 @@ static void UpdateGunSway()
 		const int state = cc ? (int)*(uint32_t*)(cc + 0x270) : 0;
 
 		// Steps: the arms dip down and back up once per step (instead of the first person walk/run
-		// animations). The pace and depth follow the ground speed: walking takes slower, shallower
-		// steps than running; nothing in the air.
+		// animations). The pace and depth follow the speed the player is moving at: walking takes
+		// slower, shallower steps than running; nothing in the air. With [Moving] bAcceleration the
+		// intended speed (what Actor::Move is asked for, before collisions) is used, which stays
+		// steady on stairs and rubble; the measured speed sags at every step-up there, which made
+		// the bob stutter.
 		if (c.smoothSteps) {
 			const NiPoint3 pos = *(NiPoint3*)(pc + off::kRefrPos);
 			const float dx = pos.x - g_sway.lastPos.x, dy = pos.y - g_sway.lastPos.y;
 			g_sway.lastPos = pos;
-			float v = dt > 0.0 ? std::sqrt(dx * dx + dy * dy) / (float)dt : 0.0f;
-			if (v > 3000.0f) v = g_sway.speed;  // teleport, load door: keep the last speed
-			g_sway.speed += (v - g_sway.speed) * std::fmin(1.0f, (float)dt / 0.08f);
+			float v, smooth;
+			if (g_cfg.move.accel) {
+				v = std::sqrt(mv.vel.x * mv.vel.x + mv.vel.y * mv.vel.y);
+				smooth = 0.08f;
+			} else {
+				v = dt > 0.0 ? std::sqrt(dx * dx + dy * dy) / (float)dt : 0.0f;
+				if (v > 3000.0f) v = g_sway.speed;  // teleport, load door: keep the last speed
+				smooth = 0.3f;
+			}
+			g_sway.speed += (v - g_sway.speed) * std::fmin(1.0f, (float)dt / smooth);
 			const float run = std::fmin(1.3f, g_sway.speed / kRunSpeed);  // 1 = running
-			const bool stepping = state == 0 && g_sway.speed > 20.0f;
+			// on the ground, or a moment in the air that did not start with a jump (stepping down
+			// a stair is often a short "fall")
+			const bool grounded = state == 0 || (c.smoothJump && !g_sway.jumped && g_sway.airTime < 0.3f);
+			const bool stepping = grounded && g_sway.speed > 20.0f;
 			const float target = stepping ? c.stepDip * std::fmax(0.35f, run) : 0.0f;
 			g_sway.stepAmp = Approach(g_sway.stepAmp, target, dt, 0.15f);
 			const float before = g_sway.stepPhase;
@@ -1615,11 +1635,16 @@ static void UpdateGunSway()
 			constexpr float kW = 2.0f * kPi / 0.45f;  // spring: about 0.45 s per bounce
 			if (state != g_sway.airState) {
 				if (g_cfg.debug) Log("gun sway: jump state %d -> %d (%.2f s in the air)", g_sway.airState, state, g_sway.airTime);
-				if (g_sway.airState == 0 && state == 1)          // took off
+				if (g_sway.airState == 0 && state == 1) {        // took off
 					g_sway.dipVel += c.jumpDip * kW * 1.6f;
-				else if (g_sway.airState != 0 && state == 0)     // landed: harder the longer the fall
+					g_sway.jumped = true;
+				} else if (g_sway.airState != 0 && state == 0 &&  // landed: harder the longer the fall.
+				           (g_sway.jumped || g_sway.airTime > 0.35f)) {
+					// (Not after a moment in the air without a jump: stairs and bumps are a short
+					// "fall" each step.)
 					g_sway.dipVel += c.landDip * kW * 1.6f * std::fmin(1.5f, std::fmax(0.3f, g_sway.airTime));
-				if (state == 0) g_sway.airTime = 0.0f;
+				}
+				if (state == 0) { g_sway.airTime = 0.0f; g_sway.jumped = false; }
 				g_sway.airState = state;
 			}
 			if (state != 0) g_sway.airTime += (float)dt;
@@ -1748,17 +1773,85 @@ static void* __fastcall Hook_PlayAnimGroup(uint8_t* animData, void* /*edx*/, uin
 
 static bool PatchVtableSlot(uintptr_t vtbl, uintptr_t slot, uintptr_t expect, void* fn);
 
+// ---------------------------------------------------------------------------------------------
+// First person stairs: the camera and the arms hang from the first person skeleton's root, which
+// sits at the player's feet, so each step the character controller takes up (or down) a stair
+// or a rock jolts the view. While on the ground, a height change is held back and eased in
+// ([Camera] fFirstPersonStairSmoothMs); the root is moved, so the arms and the view move as one.
+// The height comes from the player's position: the root is updated more than once a frame, in
+// different spaces (heights ~13000 apart). Only the world-space update (the root at the player's
+// height) is shifted: the other one places the arms relative to the camera, which already carries
+// the shift (shifting it too moved the arms twice as far as the view). Stepping down
+// a stair is often a moment in the air: short air time that did not start with a jump counts as
+// a step too. Jumps and real falls are left alone, and the view never trails by more than
+// fFirstPersonStairMax.
+
+static struct StairState {
+	bool    init = false;
+	float   lastZ = 0.0f;     // the player's height last frame
+	float   offset = 0.0f;    // height the view is held back by (units, - = below)
+	float   vel = 0.0f;
+	float   airTime = 0.0f;   // seconds off the ground
+	bool    jumped = false;   // this time off the ground started with a jump
+	int64_t lastQpc = 0;
+} g_stairs;
+
+static int PlayerCharState()
+{
+	void* proc = PlayerProcess();
+	uint8_t* cc = proc ? VCall<uint8_t*>(proc, vslot::kProcessCharController) : nullptr;
+	return cc ? (int)*(uint32_t*)(cc + 0x270) : 0;
+}
+
+static void SmoothFirstPersonHeight(NiAVObject* root)
+{
+	const CameraConfig& c = g_cfg.cam;
+	uint8_t* pc = (uint8_t*)Player();
+	if (!pc) return;
+	const int64_t now = QpcNow();
+	double dt = g_stairs.lastQpc ? (double)(now - g_stairs.lastQpc) / g_qpcFreq : 1.0;
+	// the root is updated more than once a frame: advance once, shift it each time
+	if (dt > 0.0005) {
+		g_stairs.lastQpc = now;
+		const float z = ((NiPoint3*)(pc + off::kRefrPos))->z;
+		const int state = PlayerCharState();  // 0 ground, 1 jumping, 2 in the air
+		const float dz = z - g_stairs.lastZ;
+		if (state == 0) { g_stairs.airTime = 0.0f; g_stairs.jumped = false; }
+		else            { g_stairs.airTime += (float)dt; if (state == 1) g_stairs.jumped = true; }
+		if (!g_stairs.init || dt > 0.25 || std::fabs(dz) > 64.0f || InThirdPerson() || g.ragdoll) {
+			g_stairs.offset = g_stairs.vel = 0.0f;  // start fresh (load, teleport, view switch...)
+			g_stairs.init = true;
+		} else {
+			const bool step = !g_stairs.jumped && g_stairs.airTime < 0.3f;  // on the ground, or a step down
+			if (step) g_stairs.offset -= dz;  // hold the view
+			g_stairs.offset = SmoothDamp(g_stairs.offset, 0.0f, &g_stairs.vel, dt, c.fpStairSmooth);
+			if (g_stairs.offset > c.fpStairMax) g_stairs.offset = c.fpStairMax;
+			if (g_stairs.offset < -c.fpStairMax) g_stairs.offset = -c.fpStairMax;
+			if (g_cfg.debug && step && std::fabs(dz) > 1.0f) {
+				static int n;
+				if (n++ < 40) Log("first person stairs: step %+.1f (state %d, %.2f s in the air), view held back %+.1f",
+				                  dz, state, g_stairs.airTime, g_stairs.offset);
+			}
+		}
+		g_stairs.lastZ = z;
+	}
+	// world-space update only (the root at the player's feet)
+	if (std::fabs(root->world.pos.z - ((NiPoint3*)(pc + off::kRefrPos))->z) < 256.0f)
+		root->world.pos.z += g_stairs.offset;
+}
+
 static void __fastcall Hook_UpdateWorldData(NiAVObject* self, void* /*edx*/, void* updateData)
 {
 	g_origUpdateWorldData(self, updateData);
 
-	if (g_cfg.sway.enabled) {
+	if (g_cfg.sway.enabled || g_cfg.cam.fpStairSmooth > 0.0f) {
 		NiAVObject* fp = FirstPersonRoot();
-		if (fp && self == fp) {  // updated before its children: advance the sway for this frame
-			if (FindSwayNodes(fp)) UpdateGunSway();
+		if (fp && self == fp) {  // updated before its children: stairs and the sway for this frame
+			if (g_cfg.cam.fpStairSmooth > 0.0f) SmoothFirstPersonHeight(fp);
+			if (g_cfg.sway.enabled && FindSwayNodes(fp)) UpdateGunSway();
 			return;
 		}
-		if (fp && fp == g_sway.root && (self == g_sway.arms[0] || self == g_sway.arms[1])) {
+		if (g_cfg.sway.enabled && fp && fp == g_sway.root && (self == g_sway.arms[0] || self == g_sway.arms[1])) {
 			ApplyGunSwayTo(self);
 			return;
 		}
