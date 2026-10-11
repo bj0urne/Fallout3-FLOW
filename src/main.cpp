@@ -2185,10 +2185,15 @@ static const char* CrosshairHideReason(WeapData** wOut)
 {
 	if (!Player() || !PlayerRoot()) return "no player";
 	if (!g_stateChecksOk) return "state checks failed";
+	if (PlayerRagdollReason()) return "dead or knocked down";
 	if (((bool(__cdecl*)())addr::kIsMenuMode)()) return "menu mode";
 	if (!PlayerWeaponOut()) return "weapon not out";
 	*wOut = PlayerGun();
 	if (!*wOut) return "not a gun";
+	// A scoped gun aimed (the game's aiming flag, as the gun sway uses): the scope is up or zooming
+	// in. (CrosshairTarget also compares the view's field of view with the scope's.)
+	if (g_cfg.xh.hideScoped && ((*wOut)->flags1 & 0x4) && g_swayChecksOk && PlayerAiming())
+		return "aiming through the scope";
 	return nullptr;
 }
 
