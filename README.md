@@ -50,9 +50,13 @@ Copy `FCCO.dll` and `FCCO.ini` into `Data\FOSE\Plugins`. Settings take effect th
 ## Repository layout
 
 ```
-src/main.cpp   the FOSE plugin (single file)
-FCCO.ini       default configuration, every setting documented
-build.ps1      builds FCCO.dll and installs it into ..\Data\FOSE\Plugins
+src/main.cpp           the FOSE plugin (single file)
+FCCO.ini               default configuration, every setting documented
+build.ps1              builds FCCO.dll and installs it into ..\Data\FOSE\Plugins
+tools/package.py       builds the release zips into dist/
+README.txt             player readme shipped in the release zip
+nexus_description.txt  Nexus page text (BBCode)
+nexus_summary.txt      Nexus brief overview and short description
 ```
 
 `build.ps1` expects this folder to sit inside the Fallout 3 install folder (`Fallout 3 goty\FCCO\`). It installs into `..\Data`, and it never overwrites an existing `FCCO.ini`.

@@ -1,0 +1,96 @@
+[center][size=6][b]F.C.C.O.[/b][/size]
+[size=4][b]F[/b]allout [b]C[/b]haracter [b]C[/b]ontroller [b]O[/b]verhaul[/size]
+
+Moving, aiming and looking around in Fallout 3, finally feeling like a modern game. In third person AND first person.[/center]
+
+[line]
+
+[center][b][size=5]What is this?[/size][/b][/center]
+
+Fallout 3's character controller is stiff. In third person your character slides sideways with the legs pointing straight ahead, landings lock you in a stumble, and up close your bullets miss what the crosshair is on. In first person the gun is glued to the screen and bobs like a metronome. Switching views pops, zooming jumps. You get the idea.
+
+[b]F.C.C.O.[/b] is a new (AI composed) FOSE plugin that fixes all of this. No custom skeleton, no animation replacers, no ESP, no scripts. Every feature can be turned off or tuned in [i]FCCO.ini[/i]. A one click install, provided you've already installed FOSE.
+
+[line]
+
+[center][b][size=5]Features[/size][/b][/center]
+
+[size=4][b]Third person movement[/b][/size]
+[list]
+[*][b]Legs that face where you're going:[/b] on diagonals, backwards and with a controller in any direction.[/*]
+[*][b]Strafing with your weapon drawn[/b] keeps your upper body and aim steady.[/*]
+[*][b]Turn in place:[/b] the feet stay planted, then step round to catch up.[/*]
+[*][b]Free look:[/b] with your weapon holstered, look around freely while your character stands still and follows the camera with their head.[/*]
+[*][b]Natural turning:[/b] the body trails slightly behind sharp turns, and you lean into turns while running.[/*]
+[*][b]Smooth starts and stops[/b] instead of instant full speed.[/*]
+[*][b]No landing stumble:[/b] move the moment you touch the ground.[/*]
+[/list]
+
+[size=4][b]Camera[/b][/size]
+[list]
+[*][b]Smooth switching[/b] between first and third person, gliding out of and back into your eyes.[/*]
+[*][b]Smooth zoom[/b] with the mouse wheel.[/*]
+[*][b]Shoulder swap[/b] on a key.[/*]
+[*]A soft camera lag when jumping.[/*]
+[/list]
+
+[size=4][b]Crosshair and aiming[/b][/size]
+[list]
+[*][b]A dynamic crosshair[/b] that shows your gun's real accuracy, pulses with every shot, opens when you draw and closes when you holster or reload.[/*]
+[*][b]Shots go where the crosshair is[/b], even up close in third person.[/*]
+[/list]
+
+[size=4][b]First person: the sway system[/b][/size]
+[list]
+[*]Your gun now has weight. It trails behind as you look around, bobs softly with every step, dips when you jump and land, glides as you strafe, slides on stairs and ledges, and pulls back when you crouch. Like Half-Life 2, but in the wasteland.[/*]
+[/list]
+
+[line]
+
+[center][b][size=5]Requirements[/size][/b][/center]
+
+[list]
+[*][b]Fallout 3[/b] or [b]Fallout 3: Game of the Year Edition[/b]. Tested on the Steam GOTY edition.[/*]
+[*][b][url=https://www.nexusmods.com/fallout3/mods/24913]Fallout Anniversary Patcher[/url][/b] (game version 1.7.0.3)[/*]
+[*][b][url=https://fose.silverlock.org/]Fallout Script Extender (FOSE)[/url][/b], 1.2b2 or newer[/*]
+[*]Recommended: [b][url=https://www.nexusmods.com/fallout3/mods/27726]T.E.M.P.O.[/url][/b] for smooth play at high framerates.[/*]
+[/list]
+
+[line]
+
+[center][b][size=5]Installation[/size][/b][/center]
+
+[b]Vortex / Mod Organizer 2:[/b] click [i]Mod Manager Download[/i], install and enable.
+
+[b]Manual:[/b] extract the archive into [i]Fallout 3\Data\[/i], so you end up with:
+
+[code]Data\FOSE\Plugins\FCCO.dll
+Data\FOSE\Plugins\FCCO.ini[/code]
+
+Launch the game as usual with FOSE.
+
+[line]
+
+[center][b][size=5]Compatibility[/size][/b][/center]
+
+[list]
+[*][b]Other diagonal movement mods:[/b] don't combine, or turn off F.C.C.O.'s version in the INI.[/*]
+[*][b]First person walk and jump animation replacers[/b] won't show while the sway system replaces those animations.[/*]
+[*][b]Other crosshair mods:[/b] F.C.C.O. uses its own crosshair. Turn it off in the INI to keep yours.[/*]
+[*]Only the player is changed, NPCs are untouched.[/*]
+[*]Safe to add to or remove from an existing save at any time.[/*]
+[*]Fallout 3 only. Not for New Vegas or Tale of Two Wastelands.[/*]
+[/list]
+
+[line]
+
+[center][b][size=5]Credits[/size][/b][/center]
+[list]
+[*]The [b]FOSE team[/b], for the Fallout Script Extender[/*]
+[*][b]lStewieAl[/b], for the Fallout Anniversary Patcher[/*]
+[*][b]Drarack's Diagonal Movement[/b], which inspired the leg turning[/*]
+[*]And of course, [b]Claude Code[/b], for being the brains behind the operation.[/*]
+[/list]
+
+[b]Source code:[/b] [url=https://github.com/bj0urne/Fallout3-FCCO]github.com/bj0urne/Fallout3-FCCO[/url] (MIT license)
+[b]Permissions:[/b] free to include in modpacks and collections. Please link back here rather than re-uploading.
