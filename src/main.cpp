@@ -301,6 +301,7 @@ struct GunSwayConfig {
 	float strafeShift = 2.0f; // units the gun glides against sideways movement (at running speed)
 	float crouchBack = 4.0f;  // units the gun is pulled back toward the view while crouched
 	float vertShift = 3.0f;   // units the gun slides against vertical movement (at 300 units/s)
+	float vertTime = 0.06f;   // ...reacting within about this many seconds
 	float crouchDip = 1.5f;   // ...lower
 	float crouchLeft = 0.0f;  // ...and further to the left
 };
@@ -439,15 +440,17 @@ static void LoadConfig()
 	gs.crouchLeft = IniFloat(path, "GunSway", "fCrouchLeft", gs.crouchLeft);
 	gs.crouchBack = IniFloat(path, "GunSway", "fCrouchBack", gs.crouchBack);
 	gs.vertShift  = IniFloat(path, "GunSway", "fVerticalShift", gs.vertShift);
+	gs.vertTime   = IniFloat(path, "GunSway", "fVerticalShiftMs", gs.vertTime * 1000.0f) / 1000.0f;
 	clampf(gs.vertShift, -20.0f, 20.0f);
+	clampf(gs.vertTime, 0.0f, 1.0f);
 	clampf(gs.crouchBack, -20.0f, 20.0f);
 	clampf(gs.crouchDip, 0.0f, 20.0f);
 	clampf(gs.crouchLeft, -20.0f, 20.0f);
 	Log("config: GunSway: bEnabled=%d fAmount=%.2f fCatchUpMs=%.0f fMaxDegrees=%.1f bSmoothJump=%d fJumpDip=%.1f "
 	    "fLandDip=%.1f bLockPitch=%d bSmoothSteps=%d fStepDip=%.2f fStepSway=%.2f fStrafeShift=%.2f fCrouchBack=%.2f "
-	    "fCrouchDip=%.2f fCrouchLeft=%.2f fVerticalShift=%.2f", gs.enabled, gs.amount, gs.time * 1000.0f, gs.maxDeg,
-	    gs.smoothJump, gs.jumpDip, gs.landDip, gs.lockPitch, gs.smoothSteps, gs.stepDip, gs.stepSway, gs.strafeShift,
-	    gs.crouchBack, gs.crouchDip, gs.crouchLeft, gs.vertShift);
+	    "fCrouchDip=%.2f fCrouchLeft=%.2f fVerticalShift=%.2f fVerticalShiftMs=%.0f", gs.enabled, gs.amount,
+	    gs.time * 1000.0f, gs.maxDeg, gs.smoothJump, gs.jumpDip, gs.landDip, gs.lockPitch, gs.smoothSteps, gs.stepDip,
+	    gs.stepSway, gs.strafeShift, gs.crouchBack, gs.crouchDip, gs.crouchLeft, gs.vertShift, gs.vertTime * 1000.0f);
 
 	CrosshairConfig& x = g_cfg.xh;
 	x.enabled    = b("Crosshair", "bEnabled", x.enabled);
@@ -1680,16 +1683,18 @@ static void UpdateGunSway()
 
 		// Moving up or down (stairs, ledges, rubble, jumps, falls): the gun slides against it, down
 		// while going up, up while coming down (until the landing). From the player's vertical speed,
-		// smoothed so single stair steps don't make it jitter, eased in and out and capped at 1.5x.
+		// smoothed a little (so single stair steps don't make it jitter) and eased, together within
+		// about fVerticalShiftMs (0.22 s felt like it kept adjusting after the movement); capped at 1.5x.
 		{
 			const float z = ((NiPoint3*)(pc + off::kRefrPos))->z;
 			const float dz = z - g_sway.lastZ;
 			g_sway.lastZ = z;
 			float v = dt > 0.0 ? dz / (float)dt : 0.0f;
 			if (std::fabs(dz) > 64.0f) v = 0.0f;  // teleport, load door
-			g_sway.vz += (v - g_sway.vz) * std::fmin(1.0f, (float)dt / 0.1f);
+			g_sway.vz += (v - g_sway.vz) * (c.vertTime > 0.0f ? std::fmin(1.0f, (float)dt / (c.vertTime * 0.4f)) : 1.0f);
 			const float rel = std::fmax(-1.5f, std::fmin(1.5f, g_sway.vz / 300.0f));
-			g_sway.vert = SmoothDamp(g_sway.vert, c.vertShift * rel, &g_sway.vertVel, dt, 0.12f);
+			g_sway.vert = c.vertTime > 0.0f ? SmoothDamp(g_sway.vert, c.vertShift * rel, &g_sway.vertVel, dt, c.vertTime * 0.6f)
+			                                 : c.vertShift * rel;
 		}
 
 		// The dip spring (jump, landing): about 0.45 s per bounce, settling quickly.
