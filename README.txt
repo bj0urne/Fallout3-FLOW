@@ -27,7 +27,7 @@ Camera
   eyes and back in. Press the key again mid-glide and it turns round smoothly.
 * Smooth wheel zoom: each mouse wheel step glides instead of jumping.
 * Soft vertical lag in third person: on a jump you rise ahead of the camera and drop ahead of it.
-* Shoulder swap on a key (middle mouse button by default).
+* Shoulder swap on a key (X by default).
 * The vanity camera (holding the view key) keeps you on the same side of the screen.
 
 Crosshair and aiming

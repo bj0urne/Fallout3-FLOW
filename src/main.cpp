@@ -260,7 +260,7 @@ struct CameraConfig {               // times in seconds
 	bool  enabled       = true;
 	float vertLag       = 0.15f;    // the camera follows the player's height through a spring this slow
 	bool  shoulderSwap  = true;
-	int   shoulderKey   = VK_MBUTTON;
+	int   shoulderKey   = 'X';         // virtual-key code (0x58)
 	float shoulderTime  = 0.167f;
 	bool  vanityFix     = true;     // vanity camera orbits keep the player on the same screen side
 	float viewSwitch    = 0.35f;    // first <-> third person: the camera glides between the eyes and

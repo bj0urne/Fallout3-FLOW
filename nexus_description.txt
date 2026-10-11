@@ -1,48 +1,42 @@
 [center][size=6][b]FLOW[/b][/size]
 [size=4]Gameplay Overhaul[/size]
 
-Moving, aiming and looking around in Fallout 3, finally feeling like a modern game. In third person AND first person.[/center]
+Makes moving, aiming and looking around in Fallout 3 feel smooth and modern, in both first and third person.[/center]
 
 [line]
 
 [center][b][size=5]What is this?[/size][/b][/center]
 
-Fallout 3 feels stiff. In third person your character slides sideways with the legs pointing straight ahead, landings lock you in a stumble, and up close your bullets miss what the crosshair is on. In first person the gun is glued to the screen and bobs like a metronome. Switching views pops, zooming jumps. You get the idea.
-
-[b]FLOW[/b] is a new (AI composed) FOSE plugin that fixes all of this. No custom skeleton, no animation replacers, no ESP, no scripts. Every feature can be turned off or tuned in [i]FLOW.ini[/i]. A one click install, provided you've already installed FOSE.
+FLOW is a new (AI composed) FOSE plugin that reworks how your character moves, aims and looks. No custom skeleton, no animation replacers, no ESP, no scripts. Every feature can be turned off or tuned in [i]FLOW.ini[/i].
 
 [line]
 
 [center][b][size=5]Features[/size][/b][/center]
 
-[size=4][b]Third person movement[/b][/size]
+[size=4][b]Third person[/b][/size]
 [list]
-[*][b]Legs that face where you're going:[/b] on diagonals, backwards and with a controller in any direction.[/*]
-[*][b]Strafing with your weapon drawn[/b] keeps your upper body and aim steady.[/*]
-[*][b]Turn in place:[/b] the feet stay planted, then step round to catch up.[/*]
-[*][b]Free look:[/b] with your weapon holstered, look around freely while your character stands still and follows the camera with their head.[/*]
-[*][b]Natural turning:[/b] the body trails slightly behind sharp turns, and you lean into turns while running.[/*]
+[*][b]Natural movement:[/b] your body faces the direction you're moving, leans into turns and lags slightly behind when you turn. With a weapon drawn, turning on the spot turns your torso first, and your legs follow when you turn far enough.[/*]
+[*][b]Free look:[/b] with your weapon holstered, move the camera freely while your character turns their head to look where you're aiming. The camera now orbits around your character instead of the crosshair.[/*]
 [*][b]Smooth starts and stops[/b] instead of instant full speed.[/*]
-[*][b]No landing stumble:[/b] move the moment you touch the ground.[/*]
+[*][b]No more landing stumble:[/b] land and move instantly.[/*]
+[*][b]Smooth camera:[/b] the camera follows your jumps with a soft delay.[/*]
+[*][b]Shoulder swap[/b] on a key (X by default).[/*]
 [/list]
 
-[size=4][b]Camera[/b][/size]
+[size=4][b]First person[/b][/size]
 [list]
-[*][b]Smooth switching[/b] between first and third person, gliding out of and back into your eyes.[/*]
-[*][b]Smooth zoom[/b] with the mouse wheel.[/*]
-[*][b]Shoulder swap[/b] on a key.[/*]
-[*]A soft camera lag when jumping.[/*]
+[*][b]Gun sway system:[/b] your weapon finally has weight. It trails behind as you look around, bobs as you move, and dips when you jump and land. Gunplay feels much more fluid than the base game.[/*]
 [/list]
 
 [size=4][b]Crosshair and aiming[/b][/size]
 [list]
-[*][b]A dynamic crosshair[/b] that shows your gun's real accuracy, pulses with every shot, opens when you draw and closes when you holster or reload.[/*]
-[*][b]Shots go where the crosshair is[/b], even up close in third person.[/*]
+[*][b]Dynamic crosshair:[/b] opens up to show your gun's real accuracy, opens when you draw and closes when you holster, and pulses with every shot.[/*]
+[*][b]Shots hit what you aim at,[/b] New Vegas style. No more bullets hitting a wall in front of your gun while your crosshair is on a mutant's head.[/*]
 [/list]
 
-[size=4][b]First person: the sway system[/b][/size]
+[size=4][b]Other[/b][/size]
 [list]
-[*]Your gun now has weight. It trails behind as you look around, bobs softly with every step, dips when you jump and land, glides as you strafe, slides on stairs and ledges, and pulls back when you crouch. Like Half-Life 2, but in the wasteland.[/*]
+[*][b]Smooth view switching[/b] between first and third person, and smooth zooming.[/*]
 [/list]
 
 [line]
@@ -50,7 +44,7 @@ Fallout 3 feels stiff. In third person your character slides sideways with the l
 [center][b][size=5]Requirements[/size][/b][/center]
 
 [list]
-[*][b]Fallout 3[/b] or [b]Fallout 3: Game of the Year Edition[/b]. Tested on the Steam GOTY edition.[/*]
+[*][b]Fallout 3[/b] or [b]Fallout 3: Game of the Year Edition[/b][/*]
 [*][b][url=https://www.nexusmods.com/fallout3/mods/24913]Fallout Anniversary Patcher[/url][/b] (game version 1.7.0.3)[/*]
 [*][b][url=https://fose.silverlock.org/]Fallout Script Extender (FOSE)[/url][/b], 1.2b2 or newer[/*]
 [*]Recommended: [b][url=https://www.nexusmods.com/fallout3/mods/27726]T.E.M.P.O.[/url][/b] for smooth play at high framerates.[/*]
@@ -60,25 +54,17 @@ Fallout 3 feels stiff. In third person your character slides sideways with the l
 
 [center][b][size=5]Installation[/size][/b][/center]
 
-[b]Vortex / Mod Organizer 2:[/b] click [i]Mod Manager Download[/i], install and enable.
-
-[b]Manual:[/b] extract the archive into [i]Fallout 3\Data\[/i], so you end up with:
-
-[code]Data\FOSE\Plugins\FLOW.dll
-Data\FOSE\Plugins\FLOW.ini[/code]
-
-Launch the game as usual with FOSE.
+Install with Vortex or Mod Organizer 2, or extract the archive into [i]Fallout 3\Data\[/i]. Launch the game as usual with FOSE.
 
 [line]
 
 [center][b][size=5]Compatibility[/size][/b][/center]
 
 [list]
-[*][b]Other diagonal movement mods:[/b] don't combine, or turn off FLOW's version in the INI.[/*]
-[*][b]First person walk and jump animation replacers[/b] won't show while the sway system replaces those animations.[/*]
-[*][b]Other crosshair mods:[/b] FLOW uses its own crosshair. Turn it off in the INI to keep yours.[/*]
-[*]Only the player is changed, NPCs are untouched.[/*]
-[*]Safe to add to or remove from an existing save at any time.[/*]
+[*]Don't combine with other diagonal movement mods.[/*]
+[*]First person walk and jump animation replacers won't show while the sway system is on.[/*]
+[*]Uses its own crosshair. Turn it off in the INI to keep another crosshair mod.[/*]
+[*]Safe to add to or remove from an existing save.[/*]
 [*]Fallout 3 only. Not for New Vegas or Tale of Two Wastelands.[/*]
 [/list]
 
