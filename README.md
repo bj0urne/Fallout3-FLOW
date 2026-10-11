@@ -17,7 +17,6 @@ Everything is done in the engine at runtime: no custom skeleton, no animation re
 - **Waist twist:** the twist between legs and torso is spread up the spine instead of all at the hips.
 
 ### Camera (third person)
-- **Stair smoothing (both views):** stairs, rocks and kerbs no longer jolt the view each step. The camera, and in first person the arms, ease up or down to each new height: quicker when running, longer when walking. Jumps and falls are not smoothed, and mouse rotation never is.
 - Shoulder swap on a key (middle mouse button by default).
 - The vanity camera (holding the POV key) keeps the player on the same side of the screen.
 
@@ -26,7 +25,7 @@ Everything is done in the engine at runtime: no custom skeleton, no animation re
 - **Shots follow the crosshair:** in third person, bullets normally leave the gun beside the camera and miss what the crosshair is on up close. In first person, a railing in front of the gun but not in front of your eyes stops them. FCCO starts each shot on the crosshair line, level with the gun, so it hits what the crosshair shows. Spread is kept and VATS is untouched.
 
 ### First person
-- **Gun sway:** the arms and gun trail a little behind the view and float back, easing out instead of stopping hard. The sway looks the same at any pitch and fades out when aiming down the sights, in menus and in VATS.
+- **Gun sway:** the arms and gun trail a little behind the view and float back, easing out instead of stopping hard. Moving sideways, the gun glides a little the other way. The sway looks the same at any pitch and fades out when aiming down the sights, in menus and in VATS.
 - **Smooth jumps:** the vanilla jump and land weapon shake is replaced by a soft dip that springs back. Longer falls dip more.
 - **Smooth steps:** the vanilla walk/run weapon bob is replaced by a soft dip per step that sways to alternating sides. It is quicker and deeper the faster you move, with the game's own footstep sound where each foot lands.
 - **Steady gun when looking up and down:** vanilla shifts the weapon on screen as you pitch the view; FCCO keeps it in place.
@@ -71,7 +70,6 @@ Addresses are for `Fallout3.exe` 1.7.0.3.
 - **Movement:** the player's movement flags (`PlayerMover::SetMovementFlags`, vtable `+0x0C`) pick the animation. The root-motion vector call at `0x007E89ED` and `Actor::Move` (PlayerCharacter vtable `+0x250`) carry strafe-as-run, controller 360° movement and acceleration.
 - **Landing:** the player's landing animation (JumpLand and its directions) is started and its animation slot is ended at once with the game's own slot reset (`0x0045DB50`). The game then starts the movement it had queued for after the landing.
 - **Camera:** the third person camera's final `NiAVObject::Update` call (`0x0077E538`) is redirected for the shoulder swap and the vanity orbit fix.
-- **Stairs:** while on the ground (or briefly in the air without a jump, as when stepping down), the player's height changes are held back and eased in, by shifting the third person body's 3D root and the first person skeleton root. Only their world-space update is shifted; the first person skeleton is also updated in a camera-relative space, which already follows the camera. The third person camera hangs from a node in the body, so it follows the eased body by itself.
 - **Crosshair:** drawn in a Direct3D 9 overlay (`IDirect3D9::CreateDevice` → device and swap chain `Present`/`Reset`). The vanilla HUD crosshair is hidden while it shows. The spread comes from the same weapon data and settings the game uses for its cone and wobble.
 - **Shots:** the call to `Projectile::Create` at `0x004BF017` is redirected, and the player's shots get their start point and angles from the crosshair line.
 - **First person:** the arms are turned about the head after the first person skeleton (`PlayerCharacter+0x5F0`) updates. Jump and walk/run animations on that skeleton are skipped in `AnimData::PlayAnimGroup` (`0x00461690`). The character controller's state drives the jump dip, and the ground speed drives the step dip. The walk animations' footstep text keys (`Enum: Left/Right`) are replaced by direct calls to the footstep function (`0x006C53A0`). The pitch shift comes from `fFirstPersonHandFollowMult` (vanilla 0.85), which FCCO holds at 1.

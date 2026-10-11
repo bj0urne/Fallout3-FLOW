@@ -212,7 +212,6 @@ static_assert(offsetof(NiNode, firstFree) == 0xA6, "firstFree");
 
 constexpr float kPi       = 3.14159265f;
 constexpr float kRunSpeed = 294.0f;  // the player's normal running speed (units per second, measured)
-constexpr float kWalkSpeed = 100.0f; // roughly the player's walking speed
 constexpr float kDegToRad = kPi / 180.0f;
 constexpr float kRadToDeg = 180.0f / kPi;
 constexpr uint32_t kTileVisible = 0xFA3;  // kTileValue_visible
@@ -262,9 +261,6 @@ struct CameraConfig {               // times in seconds
 	int   shoulderKey   = VK_MBUTTON;
 	float shoulderTime  = 0.167f;
 	bool  vanityFix     = true;     // vanity camera orbits keep the player on the same screen side
-	float stairSmooth   = 0.10f;    // stairs: how quickly view and body catch up with step-ups/downs
-	float stairMax      = 24.0f;    // ...and the most they may trail (units)
-	float stairSmoothWalk = 0.30f;  // the same when walking (slower steps, further apart); blended by speed
 };
 
 struct CrosshairConfig {
@@ -300,6 +296,7 @@ struct GunSwayConfig {
 	bool  smoothSteps = true; // no first person walk/run animations; a soft dip per step instead
 	float stepDip = 0.6f;    // units the arms dip per step when running (walking: less)
 	float stepSway = 0.5f;   // ...and sway to the side (alternating each step)
+	float strafeShift = 2.0f; // units the gun glides against sideways movement (at running speed)
 };
 
 static struct Config {
@@ -430,9 +427,12 @@ static void LoadConfig()
 	gs.stepSway    = IniFloat(path, "GunSway", "fStepSway", gs.stepSway);
 	clampf(gs.stepDip, 0.0f, 10.0f);
 	clampf(gs.stepSway, 0.0f, 10.0f);
+	gs.strafeShift = IniFloat(path, "GunSway", "fStrafeShift", gs.strafeShift);
+	clampf(gs.strafeShift, 0.0f, 20.0f);
 	Log("config: GunSway: bEnabled=%d fAmount=%.2f fCatchUpMs=%.0f fMaxDegrees=%.1f bSmoothJump=%d fJumpDip=%.1f "
-	    "fLandDip=%.1f bLockPitch=%d bSmoothSteps=%d fStepDip=%.2f fStepSway=%.2f", gs.enabled, gs.amount, gs.time * 1000.0f,
-	    gs.maxDeg, gs.smoothJump, gs.jumpDip, gs.landDip, gs.lockPitch, gs.smoothSteps, gs.stepDip, gs.stepSway);
+	    "fLandDip=%.1f bLockPitch=%d bSmoothSteps=%d fStepDip=%.2f fStepSway=%.2f fStrafeShift=%.2f", gs.enabled,
+	    gs.amount, gs.time * 1000.0f, gs.maxDeg, gs.smoothJump, gs.jumpDip, gs.landDip, gs.lockPitch, gs.smoothSteps,
+	    gs.stepDip, gs.stepSway, gs.strafeShift);
 
 	CrosshairConfig& x = g_cfg.xh;
 	x.enabled    = b("Crosshair", "bEnabled", x.enabled);
@@ -478,16 +478,9 @@ static void LoadConfig()
 	c.shoulderSwap  = b("Camera", "bShoulderSwap", c.shoulderSwap);
 	c.shoulderKey   = GetPrivateProfileIntA("Camera", "iShoulderSwapKey", c.shoulderKey, path);
 	c.shoulderTime  = IniFloat(path, "Camera", "fShoulderSwapMs", c.shoulderTime * 1000.0f) / 1000.0f;
-	c.stairSmooth   = IniFloat(path, "Camera", "fStairSmoothMs", c.stairSmooth * 1000.0f) / 1000.0f;
-	c.stairMax      = IniFloat(path, "Camera", "fStairMax", c.stairMax);
-	c.stairSmoothWalk = IniFloat(path, "Camera", "fStairSmoothWalkMs", c.stairSmoothWalk * 1000.0f) / 1000.0f;
 	clampf(c.shoulderTime, 0.0f, 3.0f);
-	clampf(c.stairSmooth, 0.0f, 1.0f);
-	clampf(c.stairMax, 0.0f, 100.0f);
-	clampf(c.stairSmoothWalk, 0.0f, 1.0f);
-	Log("config: Camera: bEnabled=%d bVanityOrbitFix=%d bShoulderSwap=%d iShoulderSwapKey=0x%X fShoulderSwapMs=%.0f "
-	    "fStairSmoothMs=%.0f fStairSmoothWalkMs=%.0f fStairMax=%.0f", c.enabled, c.vanityFix, c.shoulderSwap,
-	    c.shoulderKey, c.shoulderTime * 1000.0f, c.stairSmooth * 1000.0f, c.stairSmoothWalk * 1000.0f, c.stairMax);
+	Log("config: Camera: bEnabled=%d bVanityOrbitFix=%d bShoulderSwap=%d iShoulderSwapKey=0x%X fShoulderSwapMs=%.0f",
+	    c.enabled, c.vanityFix, c.shoulderSwap, c.shoulderKey, c.shoulderTime * 1000.0f);
 
 	GetPrivateProfileStringA("Skeleton", "sBodyNode", g_cfg.bodyNode, g_cfg.bodyNode, sizeof(g_cfg.bodyNode), path);
 	g_cfg.footIKOff = b("Skeleton", "bDisableFootIKWhenTurned", g_cfg.footIKOff);
@@ -1475,6 +1468,8 @@ static struct SwayState {
 	float   speed = 0.0f;                  // smoothed ground speed, units per second
 	float   stepPhase = 0.0f;              // 0..2: a left and a right step (fraction = into this step)
 	float   stepAmp = 0.0f;                // current step dip depth, units
+	float   strafe = 0.0f, strafeVel = 0.0f; // sideways glide (units, + = right of the view)
+	float   moveX = 0.0f;                    // sideways movement the glide follows (units/s), held in short air
 	NiAVObject* root = nullptr;            // first person skeleton the nodes below were found in
 	NiAVObject* head = nullptr;            // pivot
 	NiAVObject* arms[2] = {};              // left and right clavicle
@@ -1553,6 +1548,8 @@ static void UpdateGunSway()
 			g_sway.dip = g_sway.dipVel = 0.0f;
 			g_sway.lastPos = *(NiPoint3*)(pc + off::kRefrPos);
 			g_sway.speed = g_sway.stepPhase = g_sway.stepAmp = 0.0f;
+			g_sway.strafe = g_sway.strafeVel = 0.0f;
+			g_sway.moveX = 0.0f;
 			g_sway.init = true;
 		}
 		const float dH = WrapPi(h - g_sway.lastH), dP = p - g_sway.lastP;
@@ -1653,6 +1650,33 @@ static void UpdateGunSway()
 			g_sway.dip += g_sway.dipVel * (float)dt;
 		}
 
+		// Strafing: the gun glides a little against sideways movement (moving right, it trails to the
+		// left) and settles back when the movement stops. Only the sideways part of the movement
+		// counts, so diagonals glide less (about 70%) and straight forward/back not at all. Uses the
+		// intended movement (with [Moving] bAcceleration, already eased in and out), else the
+		// measured one in the player's frame. (A forward/backward glide was tried and dropped,
+		// 2026-10-12: the forward movement swings by ~20% on stairs.)
+		if (c.strafeShift > 0.0f) {
+			float lateral;  // units per second, + = moving to the right
+			if (g_cfg.move.accel) {
+				lateral = mv.vel.x;
+			} else {
+				const NiPoint3 pos = *(NiPoint3*)(pc + off::kRefrPos);
+				static NiPoint3 last = pos;
+				const float dx = pos.x - last.x, dy = pos.y - last.y;
+				last = pos;
+				lateral = dt > 0.0 ? (dx * std::cos(h) - dy * std::sin(h)) / (float)dt : 0.0f;
+				if (std::fabs(lateral) > 2000.0f) lateral = 0.0f;  // teleport, load door
+			}
+			// On stairs the player is briefly "in the air" each step and the movement can dip for a
+			// moment: hold it through short air time that did not start with a jump, and follow it
+			// through a little extra smoothing.
+			const bool stepAir = state != 0 && c.smoothJump && !g_sway.jumped && g_sway.airTime < 0.3f;
+			if (!stepAir) g_sway.moveX += (lateral - g_sway.moveX) * std::fmin(1.0f, (float)dt / 0.1f);
+			const float target = -c.strafeShift * std::fmax(-1.3f, std::fmin(1.3f, g_sway.moveX / kRunSpeed));
+			g_sway.strafe = SmoothDamp(g_sway.strafe, target, &g_sway.strafeVel, dt, 0.15f);
+		}
+
 		// Fade: first person with the weapon out, not aiming down the sights, not in a menu or VATS.
 		const bool active = !InThirdPerson() && PlayerWeaponOut() && g_swayChecksOk && !PlayerAiming() &&
 		                    !((bool(__cdecl*)())addr::kIsMenuMode)() && *(int*)addr::kVATSMode == 0 &&
@@ -1684,7 +1708,7 @@ static void ApplyGunSwayTo(NiAVObject* node)
 	// A smooth dip per step, down and back up (0 at the start and end of each step), swaying to
 	// one side and then the other: furthest out at the bottom of each dip.
 	const float step = g_sway.stepAmp * 0.5f * (1.0f - std::cos(2.0f * kPi * g_sway.stepPhase));
-	const float side = c_stepSide() * g_sway.stepAmp * std::sin(kPi * g_sway.stepPhase) * g_sway.weight;
+	const float side = (c_stepSide() * g_sway.stepAmp * std::sin(kPi * g_sway.stepPhase) + g_sway.strafe) * g_sway.weight;
 	const float dip = (g_sway.dip + step) * g_sway.weight;
 	const float oh = g_sway.oh, op = g_sway.op + dip * 0.6f * kDegToRad;  // dipping tilts the gun down a bit
 	if (std::fabs(oh) < 1e-5f && std::fabs(op) < 1e-5f && std::fabs(dip) < 1e-3f && std::fabs(side) < 1e-3f) return;
@@ -1773,115 +1797,17 @@ static void* __fastcall Hook_PlayAnimGroup(uint8_t* animData, void* /*edx*/, uin
 
 static bool PatchVtableSlot(uintptr_t vtbl, uintptr_t slot, uintptr_t expect, void* fn);
 
-// ---------------------------------------------------------------------------------------------
-// Stairs: each step the character controller takes up (or down) a stair or a rock moves the
-// player's height at once, which jolts the view and the body. While on the ground, a height change
-// is held back and eased in ([Camera] fStairSmoothMs, never trailing by more than fStairMax). One
-// offset, kept here from the player's position, is applied to everything that shows the player:
-//   first person: the first person skeleton's root (the camera and the arms hang from it, so they
-//     move as one). It is updated more than once a frame in different spaces (heights ~13000
-//     apart); only the world-space update (the root at the player's height) is shifted, the
-//     camera-relative one already follows the camera (shifting it too moved the arms twice).
-//   third person: the body's 3D root and the camera's follow point (SmoothCamera).
-// Stepping down a stair is often a moment in the air: short air time that did not start with a
-// jump counts as a step too. Jumps and real falls are left alone.
-
-static struct StairState {
-	bool    init = false;
-	float   lastZ = 0.0f;     // the player's height last frame
-	float   offset = 0.0f;    // height the player is shown held back by (units, - = below)
-	float   vel = 0.0f;
-	float   airTime = 0.0f;   // seconds off the ground
-	bool    jumped = false;   // this time off the ground started with a jump
-	float   lastX = 0.0f, lastY = 0.0f, speed = 0.0f;  // horizontal speed (without bAcceleration)
-	int64_t lastQpc = 0;
-} g_stairs;
-
-static int PlayerCharState()
-{
-	void* proc = PlayerProcess();
-	uint8_t* cc = proc ? VCall<uint8_t*>(proc, vslot::kProcessCharController) : nullptr;
-	return cc ? (int)*(uint32_t*)(cc + 0x270) : 0;
-}
-
-// Advances the offset (once per frame, from wherever it is first needed) and returns it.
-static float StairOffset()
-{
-	const CameraConfig& c = g_cfg.cam;
-	uint8_t* pc = (uint8_t*)Player();
-	if (!pc || c.stairSmooth <= 0.0f) return 0.0f;
-	const int64_t now = QpcNow();
-	const double dt = g_stairs.lastQpc ? (double)(now - g_stairs.lastQpc) / g_qpcFreq : 1.0;
-	if (dt > 0.0005) {
-		g_stairs.lastQpc = now;
-		const float z = ((NiPoint3*)(pc + off::kRefrPos))->z;
-		const int state = PlayerCharState();  // 0 ground, 1 jumping, 2 in the air
-		const float dz = z - g_stairs.lastZ;
-		if (state == 0) { g_stairs.airTime = 0.0f; g_stairs.jumped = false; }
-		else            { g_stairs.airTime += (float)dt; if (state == 1) g_stairs.jumped = true; }
-		if (!g_stairs.init || dt > 0.25 || std::fabs(dz) > 64.0f || g.ragdoll) {
-			g_stairs.offset = g_stairs.vel = 0.0f;  // start fresh (load, teleport, death...)
-			g_stairs.init = true;
-		} else {
-			const bool step = !g_stairs.jumped && g_stairs.airTime < 0.3f;  // on the ground, or a step down
-			if (step) g_stairs.offset -= dz;  // hold the player back
-			// Steps come further apart when walking: ease each one over longer, so it lasts until about
-			// the next one instead of gliding up and stopping (a jerk per step at walking pace). Blended
-			// from fStairSmoothWalkMs (walking or slower) to fStairSmoothMs (running) by the intended
-			// speed (with bAcceleration) or the measured one.
-			float speed;
-			if (g_cfg.move.accel) {
-				speed = std::sqrt(mv.vel.x * mv.vel.x + mv.vel.y * mv.vel.y);
-			} else {
-				const NiPoint3& pos = *(NiPoint3*)(pc + off::kRefrPos);
-				const float hx = pos.x - g_stairs.lastX, hy = pos.y - g_stairs.lastY;
-				const float v = std::sqrt(hx * hx + hy * hy) / (float)dt;
-				speed = g_stairs.speed + (std::fmin(v, 1000.0f) - g_stairs.speed) * std::fmin(1.0f, (float)dt / 0.3f);
-			}
-			g_stairs.speed = speed;
-			const float t = std::fmin(1.0f, std::fmax(0.0f, (speed - kWalkSpeed) / (kRunSpeed - kWalkSpeed)));
-			const float smooth = c.stairSmoothWalk + (c.stairSmooth - c.stairSmoothWalk) * t;
-			g_stairs.offset = SmoothDamp(g_stairs.offset, 0.0f, &g_stairs.vel, dt, smooth);
-			if (g_stairs.offset > c.stairMax) g_stairs.offset = c.stairMax;
-			if (g_stairs.offset < -c.stairMax) g_stairs.offset = -c.stairMax;
-			if (g_cfg.debug && step && std::fabs(dz) > 1.0f) {
-				static int n;
-				if (n++ < 20) Log("stairs: step %+.1f (state %d, %.2f s in the air), held back %+.1f",
-				                  dz, state, g_stairs.airTime, g_stairs.offset);
-			}
-		}
-		g_stairs.lastZ = z;
-		g_stairs.lastX = ((NiPoint3*)(pc + off::kRefrPos))->x;
-		g_stairs.lastY = ((NiPoint3*)(pc + off::kRefrPos))->y;
-	}
-	return g_stairs.offset;
-}
-
-// Shifts a root the player is shown by (first person skeleton, third person body) by the offset,
-// in its world-space update only (the root at the player's feet).
-static void ApplyStairOffset(NiAVObject* root)
-{
-	uint8_t* pc = (uint8_t*)Player();
-	if (!pc) return;
-	const float dz = StairOffset();
-	if (dz != 0.0f && std::fabs(root->world.pos.z - ((NiPoint3*)(pc + off::kRefrPos))->z) < 256.0f)
-		root->world.pos.z += dz;
-}
-
 static void __fastcall Hook_UpdateWorldData(NiAVObject* self, void* /*edx*/, void* updateData)
 {
 	g_origUpdateWorldData(self, updateData);
 
-	if (g_cfg.cam.stairSmooth > 0.0f && self == PlayerRoot()) ApplyStairOffset(self);  // third person body
-
-	if (g_cfg.sway.enabled || g_cfg.cam.stairSmooth > 0.0f) {
+	if (g_cfg.sway.enabled) {
 		NiAVObject* fp = FirstPersonRoot();
-		if (fp && self == fp) {  // updated before its children: stairs and the sway for this frame
-			if (g_cfg.cam.stairSmooth > 0.0f) ApplyStairOffset(fp);
-			if (g_cfg.sway.enabled && FindSwayNodes(fp)) UpdateGunSway();
+		if (fp && self == fp) {  // updated before its children: advance the sway for this frame
+			if (FindSwayNodes(fp)) UpdateGunSway();
 			return;
 		}
-		if (g_cfg.sway.enabled && fp && fp == g_sway.root && (self == g_sway.arms[0] || self == g_sway.arms[1])) {
+		if (fp && fp == g_sway.root && (self == g_sway.arms[0] || self == g_sway.arms[1])) {
 			ApplyGunSwayTo(self);
 			return;
 		}
@@ -2032,16 +1958,17 @@ static void SmoothCamera(NiAVObject* node, double dt)
 		cam.follow = P;
 		cam.followVel = {};
 	}
-	// The camera follows the player exactly. Stairs are smoothed through the body: the game places
-	// the camera from a node in the player's skeleton (measured: camera height = player + the
-	// body's stair offset + a constant), so it already moves with the eased body; adding the offset
-	// here again made it lag twice as much and catch up with a jump between steps. (The earlier
-	// general vertical smoothing here, fFollowSmoothVerticalMs, also smoothed jumps; replaced by the
-	// stair smoothing 2026-10-12. Horizontal smoothing was tried at 30 and 100 ms and dropped both
-	// times, 2026-10-09.)
+	// Only height is smoothed; horizontally the camera follows exactly (horizontal smoothing was
+	// tried at 30 and 100 ms and dropped both times, 2026-10-09).
+	cam.follow.x = P.x;
+	cam.follow.y = P.y;
+	// (Height smoothing here, fFollowSmoothVerticalMs, and stair smoothing in both views were tried
+	// and removed at the user's request, 2026-10-12: stairs in this game differ too much, some are
+	// slopes in disguise, some have glitchy steps.)
 	(void)dt;
-	cam.follow = P;
+	cam.follow.z = P.z;
 	NiPoint3 S = { T.x + cam.follow.x - P.x, T.y + cam.follow.y - P.y, T.z + cam.follow.z - P.z };
+
 	// (Easing the camera back out after walls was tried three ways and dropped, 2026-10-10: vanilla
 	// already slides it out linearly in ~0.1 s, and slowing that down didn't feel better.)
 
