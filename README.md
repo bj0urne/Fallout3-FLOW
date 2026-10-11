@@ -74,7 +74,7 @@ Addresses are for `Fallout3.exe` 1.7.0.3.
 
 ## Development and AI disclosure
 
-FLOW was developed with **Claude (Anthropic)**, which did the reverse engineering, wrote the plugin and wrote the documentation. Henry Carlsson directed the project and tested every feature in-game.
+FLOW was developed with **Claude (Anthropic)**, which did the reverse engineering, wrote the plugin and wrote the documentation. Henry Carlsson directed the project and tested every feature in-game. On Nexus Mods it carries the *AI-Generated Content* tag, as the Nexus guidelines require.
 
 ## Credits
 
