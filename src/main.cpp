@@ -284,6 +284,11 @@ struct CrosshairConfig {
 	float opacity       = 0.9f;
 	bool  outline       = true;
 	bool  hideScoped    = true;
+	bool  noGunClosed   = true;     // no gun drawn: ours replaces the vanilla one, closed, no dot
+	bool  reloadClosed  = true;     // reloading (or clearing a jam): closed too
+	float openTime      = 0.25f;    // seconds: drawing/holstering opens/closes it, the dot fades
+	float shotPulse     = 0.5f;     // each shot pulls it in this share toward the centre...
+	float shotPulseTime = 0.15f;    // ...and back out within about this many seconds
 };
 
 struct GunSwayConfig {
@@ -473,6 +478,14 @@ static void LoadConfig()
 	x.opacity    = IniFloat(path, "Crosshair", "fOpacity", x.opacity);
 	x.outline    = b("Crosshair", "bOutline", x.outline);
 	x.hideScoped = b("Crosshair", "bHideWhenScoped", x.hideScoped);
+	x.noGunClosed = b("Crosshair", "bShowClosedWithoutGun", x.noGunClosed);
+	x.reloadClosed = b("Crosshair", "bCloseWhileReloading", x.reloadClosed);
+	x.openTime   = IniFloat(path, "Crosshair", "fOpenMs", x.openTime * 1000.0f) / 1000.0f;
+	x.shotPulse  = IniFloat(path, "Crosshair", "fShotPulse", x.shotPulse);
+	x.shotPulseTime = IniFloat(path, "Crosshair", "fShotPulseMs", x.shotPulseTime * 1000.0f) / 1000.0f;
+	clampf(x.openTime, 0.0f, 2.0f);
+	clampf(x.shotPulse, 0.0f, 1.0f);
+	clampf(x.shotPulseTime, 0.02f, 1.0f);
 	clampf(x.scale, 0.1f, 10.0f);
 	clampf(x.wobbleDeg, 0.0f, 45.0f);
 	clampf(x.size, 0.1f, 10.0f);
@@ -489,6 +502,9 @@ static void LoadConfig()
 	    "fSmoothMs=%.0f bUseHUDColor=%d rgb=%d,%d,%d fOpacity=%.2f bOutline=%d bHideWhenScoped=%d",
 	    x.enabled, x.scale, x.minGap, x.lineLength, x.thickness, x.smoothTime * 1000.0f, x.hudColor,
 	    x.r, x.gr, x.b, x.opacity, x.outline, x.hideScoped);
+	Log("config: Crosshair: bShowClosedWithoutGun=%d bCloseWhileReloading=%d fOpenMs=%.0f fShotPulse=%.2f "
+	    "fShotPulseMs=%.0f", x.noGunClosed, x.reloadClosed, x.openTime * 1000.0f, x.shotPulse,
+	    x.shotPulseTime * 1000.0f);
 
 	CameraConfig& c = g_cfg.cam;
 	c.enabled       = b("Camera", "bEnabled", c.enabled);
@@ -2090,6 +2106,9 @@ static void __fastcall Hook_CameraUpdate(NiAVObject* node, void* /*edx*/, void* 
 static struct XhState {
 	bool     visible = false;
 	float    gap = 0.0f, gapVel = 0.0f;   // smoothed, pixels
+	float    open = 0.0f, openVel = 0.0f; // 0 = closed (no gun drawn, no dot), 1 = open to the spread
+	float    pulse = 0.0f, pulseVel = 0.0f, pulsePush = 0.0f;  // shot pulse: 1 = pulled in fully
+	int      shots = 0;                   // player shots since the last frame
 	int64_t  lastQpc = 0;
 	int      frustumOff = -1;             // NiCamera frustum offset, found at runtime (-2 = not found)
 	bool     vanillaHidden = false;
@@ -2170,15 +2189,26 @@ static float NonAttackWobbleMult()
 	return ok ? g->value : 0.5f;
 }
 
-static const char* CrosshairHideReason(WeapData** wOut)
+static const char* CrosshairHideReason(WeapData** wOut, bool* closed)
 {
+	*closed = false;
 	if (!Player() || !PlayerRoot()) return "no player";
 	if (!g_stateChecksOk) return "state checks failed";
 	if (PlayerRagdollReason()) return "dead or knocked down";
 	if (((bool(__cdecl*)())addr::kIsMenuMode)()) return "menu mode";
-	if (!PlayerWeaponOut()) return "weapon not out";
-	*wOut = PlayerGun();
-	if (!*wOut) return "not a gun";
+	if (*(int*)addr::kVATSMode != 0) return "VATS";
+	*wOut = PlayerWeaponOut() ? PlayerGun() : nullptr;
+	if (!*wOut) {
+		// No gun drawn (holstered, melee, unarmed, thrown): in the vanilla crosshair's place, ours
+		// closed (no spread, no dot), exactly when the game shows its own: the HUD mode's
+		// crosshair bit, which already includes the player's crosshair setting (+0x18C is masked
+		// by +0x190, cleared when bCrossHair is off).
+		if (!g_cfg.xh.noGunClosed) return "no gun drawn";
+		uint8_t* hud = *(uint8_t**)addr::kHUDMainMenu;
+		if (!hud || !(*(uint32_t*)(hud + 0x18C) & 0x40)) return "no gun drawn, HUD crosshair off";
+		*closed = true;
+		return nullptr;
+	}
 	// A scoped gun aimed (the game's aiming flag, as the gun sway uses): the scope is up or zooming
 	// in. (CrosshairTarget also compares the view's field of view with the scope's.)
 	if (g_cfg.xh.hideScoped && ((*wOut)->flags1 & 0x4) && g_swayChecksOk && PlayerAiming())
@@ -2186,17 +2216,106 @@ static const char* CrosshairHideReason(WeapData** wOut)
 	return nullptr;
 }
 
-// Works out whether to draw and the target gap in pixels.
-static bool CrosshairTarget(float width, float* gapOut)
+// Reloading or clearing a jam: the group playing in the weapon slot (4) of the player's body or
+// first person animation data (AnimData +0x4C: current group per slot, u16, low byte = group,
+// 0xFF = none) is ReloadA..ReloadK (142-152) or JamA..JamK (153-163). Returns 0 none, 1 reload,
+// 2 jam.
+static int PlayerReloading()
+{
+	uint8_t* pc = (uint8_t*)Player();
+	void* proc = PlayerProcess();
+	if (!pc || !proc) return 0;
+	uint8_t* const anims[2] = { VCall<uint8_t*>(proc, 0x1B4), *(uint8_t**)(pc + 0x5EC) };  // as 0x76CCE0
+	int r = 0;
+	for (uint8_t* ad : anims) {
+		if (!ad) continue;
+		const uint32_t g = *(uint16_t*)(ad + 0x4C + 4 * 2) & 0xFF;
+		if (g >= 153 && g <= 163) return 2;
+		if (g >= 142 && g <= 152) r = 1;
+	}
+	return r;
+}
+
+// Reload jams: when a reload finishes, the actor animation code (0x71F94D) looks up the gun's
+// reload jam chance for its condition (0x583720(condition index from process vfunc 0x364)) and,
+// if it is above 0, rolls it (0x491770, called at 0x720179); a hit plays the Jam group. That roll
+// is hooked (with the actor, through FCCO_JamRollThunk) so the crosshair can stay closed exactly
+// until it is known whether a jam follows the reload.
+static bool    g_jamHookOk;
+static int64_t g_jamRollQpc;    // the player's last reload jam roll...
+static bool    g_jamRollHit;    // ...and whether it jammed
+extern "C" bool __cdecl FCCO_JamRoll(float chance, void* actor)
+{
+	const bool hit = ((bool(__cdecl*)(float))0x00491770)(chance);
+	if (actor && actor == Player()) {
+		g_jamRollQpc = QpcNow();
+		g_jamRollHit = hit;
+		if (g_cfg.debug) {
+			static int n;
+			if (n++ < 20) Log("crosshair: reload jam roll, chance %.3f: %s", chance, hit ? "JAM" : "no jam");
+		}
+	}
+	return hit;
+}
+extern "C" void FCCO_JamRollThunk();  // the call at 0x720179: chance on the stack, actor in esi
+__asm__(
+	".text\n"
+	".globl _FCCO_JamRollThunk\n"
+	"_FCCO_JamRollThunk:\n"
+	"	pushl %esi\n"
+	"	pushl 8(%esp)\n"
+	"	call _FCCO_JamRoll\n"
+	"	addl $8, %esp\n"
+	"	ret\n");
+
+// The player's reload jam chance right now (> 0: a roll will follow the reload).
+static float PlayerReloadJamChance()
+{
+	void* pc = Player();
+	void* proc = PlayerProcess();
+	if (!pc || !proc) return 0.0f;
+	const int idx = ((int(__thiscall*)(void*, void*))(*(void***)proc)[0x364 / 4])(proc, pc);
+	const float c = ((float(__cdecl*)(int))0x00583720)(idx);
+	return std::isfinite(c) ? c : 0.0f;
+}
+
+// Works out whether to draw, whether closed (no gun drawn, reloading) and the target gap in pixels.
+static bool CrosshairTarget(float width, float* gapOut, bool* closed)
 {
 	WeapData* w = nullptr;
-	const char* why = CrosshairHideReason(&w);
+	const char* why = CrosshairHideReason(&w, closed);
 	static const char* lastWhy = "start";
-	if (g_cfg.debug && why != lastWhy) {
-		Log("crosshair: %s", why ? why : "shown");
-		lastWhy = why;
+	// Closed while reloading or clearing a jam. When a reload ends and the gun can jam, it stays
+	// closed until the game's jam roll (or 0.5 s, if no roll comes): a jam then keeps it closed.
+	static int     lastKind;
+	static int64_t kindStart, reloadEnd;
+	bool reloading = false;
+	if (!why && !*closed && g_cfg.xh.reloadClosed) {
+		const int64_t now = QpcNow();
+		const int kind = PlayerReloading();
+		if (kind && kind != lastKind) kindStart = now;
+		if (!kind && lastKind == 1) reloadEnd = now;
+		if (kind) reloadEnd = 0;
+		lastKind = kind;
+		reloading = kind != 0;
+		if (!kind && reloadEnd && g_jamHookOk) {
+			if (g_jamRollQpc >= kindStart) {
+				// rolled: a jam starts its animation in a moment; no jam opens it now
+				reloading = g_jamRollHit && (double)(now - g_jamRollQpc) / g_qpcFreq < 0.5;
+			} else {
+				reloading = (double)(now - reloadEnd) / g_qpcFreq < 0.5 && PlayerReloadJamChance() > 0.0f;
+			}
+			if (!reloading) reloadEnd = 0;
+		}
+	}
+	const char* state = why ? why : *closed ? "shown closed (no gun drawn)" : reloading ? "shown closed (reloading or jam)" : "shown";
+	if (g_cfg.debug && state != lastWhy) {
+		Log("crosshair: %s", state);
+		lastWhy = state;
 	}
 	if (why) return false;
+	if (reloading) *closed = true;
+	if (*closed) { *gapOut = 0.0f; return true; }
 	float right = CameraFrustumRight();
 	if (right <= 0.0f) right = std::tan(37.5f * kDegToRad);
 	if (g_cfg.xh.hideScoped && (w->flags1 & 0x4) && w->sightFOV > 0.0f) {
@@ -2665,7 +2784,11 @@ static void DrawSplitCrosshair(IDirect3DDevice9* dev, const XhTex& img, float W,
 	const CrosshairConfig& cc = g_cfg.xh;
 	const float s = cc.size * H / 960.0f;  // interface units (960 = screen height) -> pixels
 	const float cx = W * 0.5f, cy = H * 0.5f;
-	const float off = std::fmax(0.0f, xh.gap - img.tip * s);
+	// Opening (drawing a gun) moves the halves from the closed position out to the spread; a shot
+	// pulls their tips in toward the centre (past the closed position) and back out.
+	const float tip = img.tip * s;
+	const float tips = (tip + std::fmax(0.0f, xh.gap - tip) * xh.open) * (1.0f - xh.pulse * cc.shotPulse);
+	const float off = tips - tip;
 	const float half = img.w * 0.5f * s;
 	const float yt = cy - img.centreY * s, yb = yt + img.h * s;
 	dev->SetFVF(D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_TEX1);
@@ -2686,8 +2809,9 @@ static void DrawSplitCrosshair(IDirect3DDevice9* dev, const XhTex& img, float W,
 	TexRect(dev, cx + off, yt, cx + off + half, yb, 0.5f, 1.0f, color);
 	if (cc.dotSize > 0.0f && xhImg.dot) {
 		const float r = cc.dotSize * H / 1080.0f * 0.5f / kDotCore;  // fDotSize = the bright core
+		const uint32_t da = (uint32_t)((color >> 24) * std::fmin(1.0f, std::fmax(0.0f, xh.open)) + 0.5f);
 		dev->SetTexture(0, xhImg.dot);
-		TexRect(dev, cx - r, cy - r, cx + r, cy + r, 0.0f, 1.0f, color);
+		if (da) TexRect(dev, cx - r, cy - r, cx + r, cy + r, 0.0f, 1.0f, (da << 24) | (color & 0xFFFFFF));
 	}
 	dev->SetTexture(0, nullptr);
 }
@@ -2721,7 +2845,10 @@ static void DrawCrosshair(IDirect3DDevice9* dev)
 	xh.lastQpc = now;
 
 	float target = 0.0f;
-	const bool show = CrosshairTarget(W, &target);
+	bool closed = false;
+	const bool show = CrosshairTarget(W, &target, &closed);
+	const int shots = xh.shots;
+	xh.shots = 0;
 	if (show || xh.vanillaHidden) SetVanillaCrosshair(show);
 	if (!show) {
 		xh.visible = false;
@@ -2737,8 +2864,33 @@ static void DrawCrosshair(IDirect3DDevice9* dev)
 	const float minGap = split ? 0.0f : cc.minGap * k;
 	if (target < minGap) target = minGap;
 	if (target > H * 0.4f) target = H * 0.4f;
-	if (!xh.visible) { xh.gap = target; xh.gapVel = 0.0f; }  // appear at the right size
-	else xh.gap = SmoothDamp(xh.gap, target, &xh.gapVel, dt > 0.1 ? 0.1 : dt, cc.smoothTime);
+	const double sdt = dt > 0.1 ? 0.1 : dt;
+	if (!xh.visible) {  // appear at the right size, open or closed (no animation after menus etc.)
+		xh.gap = target;
+		xh.gapVel = 0.0f;
+		xh.open = closed ? 0.0f : 1.0f;
+		xh.openVel = 0.0f;
+		xh.pulse = xh.pulseVel = xh.pulsePush = 0.0f;
+	} else {
+		// closed: the spread gap is kept as it was, the halves close over it (and open over it again)
+		if (!closed) xh.gap = SmoothDamp(xh.gap, target, &xh.gapVel, sdt, cc.smoothTime);
+		xh.open = cc.openTime > 0.0f ? SmoothDamp(xh.open, closed ? 0.0f : 1.0f, &xh.openVel, sdt, cc.openTime * 0.4f)
+		                             : (closed ? 0.0f : 1.0f);
+	}
+	// Shot pulse: each shot adds a push that fades quickly; the pull-in follows it through a
+	// critically damped spring (peak about 1 for one shot), in small steps at any frame rate.
+	if (cc.shotPulse > 0.0f) {
+		const float w = 7.0f / cc.shotPulseTime, tau = cc.shotPulseTime * 0.25f;
+		if (shots > 0 && !closed) xh.pulsePush = std::fmin(xh.pulsePush + 1.6f, 2.0f);
+		const int n = (int)std::ceil(sdt / 0.002);
+		const float h = n > 0 ? (float)sdt / n : 0.0f;
+		for (int i = 0; i < n && i < 60; ++i) {
+			xh.pulsePush *= std::exp(-h / tau);
+			xh.pulseVel += (w * w * (xh.pulsePush - xh.pulse) - 2.0f * w * xh.pulseVel) * h;
+			xh.pulse += xh.pulseVel * h;
+		}
+		xh.pulse = std::fmax(0.0f, std::fmin(1.0f, xh.pulse));
+	}
 	xh.visible = true;
 
 	uint32_t rgb = (uint32_t)((cc.r & 255) << 16 | (cc.gr & 255) << 8 | (cc.b & 255));
@@ -2788,7 +2940,7 @@ static void DrawCrosshair(IDirect3DDevice9* dev)
 
 	if (SUCCEEDED(dev->BeginScene())) {
 		const float cx = std::floor(W * 0.5f), cy = std::floor(H * 0.5f);
-		const float g = std::floor(xh.gap + 0.5f);
+		const float g = std::floor(minGap + (std::fmax(minGap, xh.gap) - minGap) * xh.open * (1.0f - xh.pulse * cc.shotPulse) + 0.5f);
 		const float len = std::fmax(2.0f, std::floor(cc.lineLength * k + 0.5f));
 		const float t = std::fmax(1.0f, std::floor(cc.thickness * k + 0.5f));
 		const float h0 = std::floor(t * 0.5f), h1 = t - h0;  // thickness split around the centre
@@ -2907,6 +3059,7 @@ static void* __cdecl Hook_CreateProjectile(uint32_t a0, uint32_t shooter, uint32
 	                                                           bits(heading), bits(pitch), a9, a10, a11, a12, a13,
 	                                                           a14, a15);
 	if (moved && proj && g_cfg.xh.hideTracers) HideTracer((uint8_t*)proj, (uint8_t*)(uintptr_t)a0);
+	if (proj && shooter == (uint32_t)(uintptr_t)Player()) ++xh.shots;  // the crosshair's shot pulse
 	return proj;
 }
 
@@ -3214,7 +3367,7 @@ __declspec(dllexport) bool FOSEPlugin_Load(const FOSEInterface* fose)
 			g_vatsOk = memcmp((const void*)0x005122DF, vats, sizeof(vats)) == 0;
 			const uintptr_t cp = addr::kCallCreateProjectile;
 			const bool aimLine = g_cfg.xh.converge || g_cfg.xh.convergeFirst;
-			if (aimLine && g_vatsOk && *(uint8_t*)cp == 0xE8 &&
+			if ((aimLine || g_cfg.xh.shotPulse > 0.0f) && g_vatsOk && *(uint8_t*)cp == 0xE8 &&
 			    cp + 5 + *(int32_t*)(cp + 1) == addr::kCreateProjectile) {
 				DWORD old;
 				VirtualProtect((void*)cp, 5, PAGE_EXECUTE_READWRITE, &old);
@@ -3222,9 +3375,26 @@ __declspec(dllexport) bool FOSEPlugin_Load(const FOSEInterface* fose)
 				VirtualProtect((void*)cp, 5, old, &old);
 				FlushInstructionCache(GetCurrentProcess(), (void*)cp, 5);
 				Log("hooked projectile creation at %08X (shots fly along the crosshair line: third person %d, "
-				    "first person %d)", (unsigned)cp, g_cfg.xh.converge, g_cfg.xh.convergeFirst);
-			} else if (aimLine) {
+				    "first person %d; crosshair shot pulse %d)", (unsigned)cp, g_cfg.xh.converge, g_cfg.xh.convergeFirst,
+				    g_cfg.xh.shotPulse > 0.0f);
+			} else if (aimLine || g_cfg.xh.shotPulse > 0.0f) {
 				Log("WARNING: projectile creation or VATS state do not match; third person shots stay vanilla");
+			}
+			{
+				// reload jam roll (see FCCO_JamRoll): push edi; call 0x583720; fstp [esp]; call 0x491770
+				const uint8_t jam[] = { 0x57, 0xE8, 0xAA, 0x35, 0xE6, 0xFF, 0xD9, 0x1C, 0x24, 0xE8, 0xF2, 0x15, 0xD7, 0xFF };
+				const uintptr_t jc = 0x00720179;
+				if (g_cfg.xh.reloadClosed && memcmp((const void*)(jc - 9), jam, sizeof(jam)) == 0) {
+					DWORD old;
+					VirtualProtect((void*)jc, 5, PAGE_EXECUTE_READWRITE, &old);
+					*(int32_t*)(jc + 1) = (int32_t)((uintptr_t)&FCCO_JamRollThunk - (jc + 5));
+					VirtualProtect((void*)jc, 5, old, &old);
+					FlushInstructionCache(GetCurrentProcess(), (void*)jc, 5);
+					g_jamHookOk = true;
+					Log("hooked reload jam roll at %08X", (unsigned)jc);
+				} else if (g_cfg.xh.reloadClosed) {
+					Log("WARNING: reload jam roll does not match; the crosshair opens right after a reload");
+				}
 			}
 			const uintptr_t at = addr::kCallHudCrosshairVisible;
 			if (*(uint8_t*)at == 0xE8 && at + 5 + *(int32_t*)(at + 1) == addr::kTileSetFloat) {
