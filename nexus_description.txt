@@ -1,4 +1,5 @@
-[center][size=6][b]Gameplay Feel Overhaul[/b][/size]
+[center][size=6][b]FLOW[/b][/size]
+[size=4]Gameplay Overhaul[/size]
 
 Moving, aiming and looking around in Fallout 3, finally feeling like a modern game. In third person AND first person.[/center]
 
@@ -8,7 +9,7 @@ Moving, aiming and looking around in Fallout 3, finally feeling like a modern ga
 
 Fallout 3 feels stiff. In third person your character slides sideways with the legs pointing straight ahead, landings lock you in a stumble, and up close your bullets miss what the crosshair is on. In first person the gun is glued to the screen and bobs like a metronome. Switching views pops, zooming jumps. You get the idea.
 
-[b]GFO[/b] is a new (AI composed) FOSE plugin that fixes all of this. No custom skeleton, no animation replacers, no ESP, no scripts. Every feature can be turned off or tuned in [i]GFO.ini[/i]. A one click install, provided you've already installed FOSE.
+[b]FLOW[/b] is a new (AI composed) FOSE plugin that fixes all of this. No custom skeleton, no animation replacers, no ESP, no scripts. Every feature can be turned off or tuned in [i]FLOW.ini[/i]. A one click install, provided you've already installed FOSE.
 
 [line]
 
@@ -63,8 +64,8 @@ Fallout 3 feels stiff. In third person your character slides sideways with the l
 
 [b]Manual:[/b] extract the archive into [i]Fallout 3\Data\[/i], so you end up with:
 
-[code]Data\FOSE\Plugins\GFO.dll
-Data\FOSE\Plugins\GFO.ini[/code]
+[code]Data\FOSE\Plugins\FLOW.dll
+Data\FOSE\Plugins\FLOW.ini[/code]
 
 Launch the game as usual with FOSE.
 
@@ -73,9 +74,9 @@ Launch the game as usual with FOSE.
 [center][b][size=5]Compatibility[/size][/b][/center]
 
 [list]
-[*][b]Other diagonal movement mods:[/b] don't combine, or turn off GFO's version in the INI.[/*]
+[*][b]Other diagonal movement mods:[/b] don't combine, or turn off FLOW's version in the INI.[/*]
 [*][b]First person walk and jump animation replacers[/b] won't show while the sway system replaces those animations.[/*]
-[*][b]Other crosshair mods:[/b] GFO uses its own crosshair. Turn it off in the INI to keep yours.[/*]
+[*][b]Other crosshair mods:[/b] FLOW uses its own crosshair. Turn it off in the INI to keep yours.[/*]
 [*]Only the player is changed, NPCs are untouched.[/*]
 [*]Safe to add to or remove from an existing save at any time.[/*]
 [*]Fallout 3 only. Not for New Vegas or Tale of Two Wastelands.[/*]
@@ -91,5 +92,5 @@ Launch the game as usual with FOSE.
 [*]And of course, [b]Claude Code[/b], for being the brains behind the operation.[/*]
 [/list]
 
-[b]Source code:[/b] [url=https://github.com/bj0urne/Fallout3-GFO]github.com/bj0urne/Fallout3-GFO[/url] (MIT license)
+[b]Source code:[/b] [url=https://github.com/bj0urne/Fallout3-FLOW]github.com/bj0urne/Fallout3-FLOW[/url] (MIT license)
 [b]Permissions:[/b] free to include in modpacks and collections. Please link back here rather than re-uploading.

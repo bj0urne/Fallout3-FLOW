@@ -1,10 +1,10 @@
-"""Build the Nexus release archives for GFO.
+"""Build the Nexus release archives for FLOW.
 
     python package.py
 
-Produces in GFO\\dist\\:
-    GFO-<version>.zip          main file: Data-relative layout for Vortex / MO2 / manual install
-    GFO-<version>-source.zip   optional file: source code and tools
+Produces in FLOW\\dist\\:
+    FLOW-<version>.zip          main file: Data-relative layout for Vortex / MO2 / manual install
+    FLOW-<version>-source.zip   optional file: source code and tools
 
 Rebuilds the DLL first, then checks the result: debug options off in the shipped INI, the main
 features on, and the DLL exports the FOSE entry points.
@@ -71,11 +71,11 @@ def ini_sections(ini):
 
 def main():
     ver = version()
-    print(f"GFO {ver}: building")
+    print(f"FLOW {ver}: building")
     build()
 
     readme = open(os.path.join(ROOT, "README.txt"), encoding="utf-8").read().replace("{VERSION}", ver)
-    ini = open(os.path.join(ROOT, "GFO.ini"), "rb").read()
+    ini = open(os.path.join(ROOT, "FLOW.ini"), "rb").read()
 
     # Release checks
     problems = []
@@ -91,30 +91,30 @@ def main():
     for (sec, key), want in expect.items():
         got = cfg.get(sec, {}).get(key)
         if got != want:
-            problems.append(f"GFO.ini: expected [{sec}] {key}={want}, found {got}")
-    exports = dll_exports(os.path.join(BUILD, "GFO.dll"))
+            problems.append(f"FLOW.ini: expected [{sec}] {key}={want}, found {got}")
+    exports = dll_exports(os.path.join(BUILD, "FLOW.dll"))
     for name in ("FOSEPlugin_Query", "FOSEPlugin_Load"):
         if name not in exports:
-            problems.append(f"GFO.dll does not export {name}")
+            problems.append(f"FLOW.dll does not export {name}")
     if "{VERSION}" in readme or ver not in readme:
         problems.append("README.txt: version not filled in")
     if problems:
         raise SystemExit("release checks failed:\n  " + "\n  ".join(problems))
 
     main_files = [
-        ("FOSE/Plugins/GFO.dll", open(os.path.join(BUILD, "GFO.dll"), "rb").read()),
-        ("FOSE/Plugins/GFO.ini", ini),
-        ("FOSE/Plugins/GFO - Readme.txt", readme.replace("\r\n", "\n").replace("\n", "\r\n").encode("utf-8")),
+        ("FOSE/Plugins/FLOW.dll", open(os.path.join(BUILD, "FLOW.dll"), "rb").read()),
+        ("FOSE/Plugins/FLOW.ini", ini),
+        ("FOSE/Plugins/FLOW - Readme.txt", readme.replace("\r\n", "\n").replace("\n", "\r\n").encode("utf-8")),
     ]
 
     source_files = []
-    for rel in ["README.md", "README.txt", "LICENSE", "GFO.ini", "build.ps1", "nexus_description.txt",
+    for rel in ["README.md", "README.txt", "LICENSE", "FLOW.ini", "build.ps1", "nexus_description.txt",
                 "nexus_summary.txt", "src/main.cpp", "tools/package.py"]:
-        source_files.append((f"GFO-{ver}-source/{rel}", open(os.path.join(ROOT, rel), "rb").read()))
+        source_files.append((f"FLOW-{ver}-source/{rel}", open(os.path.join(ROOT, rel), "rb").read()))
 
     os.makedirs(DIST, exist_ok=True)
     stamp = time.localtime()[:6]
-    for name, files in ((f"GFO-{ver}.zip", main_files), (f"GFO-{ver}-source.zip", source_files)):
+    for name, files in ((f"FLOW-{ver}.zip", main_files), (f"FLOW-{ver}-source.zip", source_files)):
         path = os.path.join(DIST, name)
         with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
             for arc, data in files:

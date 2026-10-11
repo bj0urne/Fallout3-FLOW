@@ -5,7 +5,7 @@ Fallout 3's movement, aiming and camera, finally feeling modern. Legs that face 
 
 === Short description (under 350 words) ===
 
-GFO (Gameplay Feel Overhaul) makes moving, aiming and looking around in Fallout 3 feel like a modern game, in both third and first person.
+FLOW (Gameplay Overhaul) makes moving, aiming and looking around in Fallout 3 feel like a modern game, in both third and first person.
 
 In third person your legs face where you're going, your character turns in place with planted feet, strafing keeps your aim steady, starts and stops ease in and out, and landings no longer lock you in a stumble. Free look lets you look around while your character stands still.
 
@@ -15,6 +15,6 @@ A dynamic crosshair shows your gun's real accuracy, pulses with every shot and c
 
 In first person, the sway system gives your gun weight: it trails behind your view, bobs with your steps, dips on jumps and landings, and reacts to strafing, stairs and crouching.
 
-No custom skeleton, no animation replacers, no ESP and no scripts. Every feature can be turned off or tuned in GFO.ini.
+No custom skeleton, no animation replacers, no ESP and no scripts. Every feature can be turned off or tuned in FLOW.ini.
 
 Requires the Fallout Anniversary Patcher (game version 1.7.0.3) and FOSE. Recommended with T.E.M.P.O. for high framerates.

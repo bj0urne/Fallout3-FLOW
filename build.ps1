@@ -1,5 +1,5 @@
-﻿# Builds GFO.dll (32-bit) with llvm-mingw and installs it into Data\FOSE\Plugins.
-#   .\build.ps1            build + install (keeps an existing GFO.ini)
+﻿# Builds FLOW.dll (32-bit) with llvm-mingw and installs it into Data\FOSE\Plugins.
+#   .\build.ps1            build + install (keeps an existing FLOW.ini)
 #   .\build.ps1 -NoInstall build only
 param([switch]$NoInstall)
 $ErrorActionPreference = 'Stop'
@@ -15,7 +15,7 @@ if (-not $cxx) { throw 'i686-w64-mingw32-clang++ not found (install MartinStorsj
 
 $out = Join-Path $root 'build'
 New-Item -ItemType Directory -Force $out | Out-Null
-$dll = Join-Path $out 'GFO.dll'
+$dll = Join-Path $out 'FLOW.dll'
 
 & $cxx -std=c++17 -O2 -msse2 -mfpmath=sse -Wall -Wextra -shared -static -s `
     -o $dll (Join-Path $root 'src\main.cpp') -ld3d9
@@ -26,7 +26,7 @@ if (-not $NoInstall) {
     $plugins = Join-Path $root '..\Data\FOSE\Plugins'
     New-Item -ItemType Directory -Force $plugins | Out-Null
     Copy-Item $dll $plugins -Force
-    $ini = Join-Path $plugins 'GFO.ini'
-    if (-not (Test-Path $ini)) { Copy-Item (Join-Path $root 'GFO.ini') $ini }
+    $ini = Join-Path $plugins 'FLOW.ini'
+    if (-not (Test-Path $ini)) { Copy-Item (Join-Path $root 'FLOW.ini') $ini }
     Write-Host "installed to $((Resolve-Path $plugins).Path)"
 }

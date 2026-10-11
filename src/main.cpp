@@ -1,4 +1,4 @@
-// GFO (Gameplay Feel Overhaul) - FOSE plugin for Fallout 3 (1.7.0.3): third person
+// FLOW (Gameplay Overhaul) - FOSE plugin for Fallout 3 (1.7.0.3): third person
 // movement, camera and crosshair, and first person gun sway. It started with making the player's
 // third person legs move more naturally (the upper body, aim and camera are never affected):
 //   Diagonal:     when moving diagonally, the legs face the direction of travel instead of running
@@ -35,7 +35,7 @@
 #include <cstring>
 #include <vector>
 
-#define PLUGIN_NAME        "GFO"
+#define PLUGIN_NAME        "FLOW"
 #define PLUGIN_VERSION     1
 #define PLUGIN_VERSION_STR "1.0.0"
 
@@ -209,7 +209,7 @@ static_assert(offsetof(NiNode, children) == 0xA0, "children");
 static_assert(offsetof(NiNode, firstFree) == 0xA6, "firstFree");
 
 // ---------------------------------------------------------------------------------------------
-// Config (Data\FOSE\Plugins\GFO.ini)
+// Config (Data\FOSE\Plugins\FLOW.ini)
 
 constexpr float kPi       = 3.14159265f;
 constexpr float kRunSpeed = 294.0f;  // the player's normal running speed (units per second, measured)
@@ -1446,7 +1446,7 @@ static void __fastcall Hook_SetMovementFlags(void* mover, void* /*edx*/, uint32_
 	// Weapon drawn, pure strafe: tell the game "forward" so it plays the forward walk/run instead
 	// of the strafe animation; the legs are then turned 90 degrees (TargetAngle) and the movement
 	// vector is turned to match (Hook_AnimMoveVector). The real keys are kept in g.strafeKeys so
-	// the rest of GFO still sees a strafe.
+	// the rest of FLOW still sees a strafe.
 	const uint32_t dir = flags & kMove_Direction;
 	const bool pureStrafe = (dir == kMove_Left || dir == kMove_Right);
 	g.strafeKeys = 0;
@@ -1827,11 +1827,11 @@ static void ApplyGunSwayTo(NiAVObject* node)
 // is not enough: once the idle has blended out, a lone sequence is applied at full strength.) The
 // walk/run animations only move Bip01, Bip01 Translate/Rotate and Camera1st, and carry the
 // footstep text keys ("Enum: Left/Right"); those footsteps are played by the step bob instead.
-extern "C" void GFO_PlayAnimGroupOrig();  // the original's first two instructions, then the rest of it
+extern "C" void FLOW_PlayAnimGroupOrig();  // the original's first two instructions, then the rest of it
 __asm__(
 	".text\n"
-	".globl _GFO_PlayAnimGroupOrig\n"
-	"_GFO_PlayAnimGroupOrig:\n"
+	".globl _FLOW_PlayAnimGroupOrig\n"
+	"_FLOW_PlayAnimGroupOrig:\n"
 	"	pushl %ebx\n"
 	"	movl 8(%esp), %ebx\n"
 	"	pushl $0x00461695\n"
@@ -1841,7 +1841,7 @@ typedef void*(__thiscall* PlayAnimGroup_t)(void*, uint32_t, uint32_t, int32_t, i
 static void* __fastcall Hook_PlayAnimGroup(uint8_t* animData, void* /*edx*/, uint32_t groupId, uint32_t now,
                                            int32_t a3, int32_t a4)
 {
-	const PlayAnimGroup_t orig = (PlayAnimGroup_t)(uintptr_t)&GFO_PlayAnimGroupOrig;
+	const PlayAnimGroup_t orig = (PlayAnimGroup_t)(uintptr_t)&FLOW_PlayAnimGroupOrig;
 	const uint32_t g = groupId & 0xFF;
 	// Landing (JumpLand and its directions) on the player's body: it starts, and its slot is ended
 	// right away with the game's own slot reset (AnimData 0x45DB50, as when an animation finishes).
@@ -2150,7 +2150,7 @@ static void UpdateZoomSmooth()
 // factor ([esp+0x20]). The vanity code is replaced by that (same directions as vanilla); with a
 // gamepad (the 0x477B00 condition) the vanilla code runs. (Tried and reverted 2026-10-11: a tilt
 // limit, a glide back on release, and turning the player instead of the vanity angles.)
-extern "C" void __cdecl GFO_VanityMouse(int dx, int dy, float fovFactor)
+extern "C" void __cdecl FLOW_VanityMouse(int dx, int dy, float fovFactor)
 {
 	float sens = *(float*)0x0107BCE0;
 	if (!(sens > 0.0f && sens < 1.0f)) sens = 0.002f;
@@ -2158,11 +2158,11 @@ extern "C" void __cdecl GFO_VanityMouse(int dx, int dy, float fovFactor)
 	*(float*)0x0107BDC0 += (float)dx * sens * fovFactor;  // vanity yaw
 	*(float*)0x0107BDB8 += (float)dy * sens * fovFactor;  // vanity pitch
 }
-extern "C" void GFO_VanityMouseStub();
+extern "C" void FLOW_VanityMouseStub();
 __asm__(
 	".text\n"
-	".globl _GFO_VanityMouseStub\n"
-	"_GFO_VanityMouseStub:\n"
+	".globl _FLOW_VanityMouseStub\n"
+	"_FLOW_VanityMouseStub:\n"
 	"	cmpb $0, 0x01075B28\n"
 	"	je 1f\n"
 	"	cmpb $0, 0x01075CAC\n"
@@ -2174,7 +2174,7 @@ __asm__(
 	"	pushl 0x20(%esp)\n"       // zoom factor
 	"	pushl 0x18(%esp)\n"       // mouse y (was [esp+0x14])
 	"	pushl 0x20(%esp)\n"       // mouse x (was [esp+0x18])
-	"	call _GFO_VanityMouse\n"
+	"	call _FLOW_VanityMouse\n"
 	"	addl $12, %esp\n"
 	"	pushl $0x0077C64D\n"      // where the vanilla vanity code continues
 	"	ret\n");
@@ -2454,12 +2454,12 @@ static int PlayerReloading()
 // Reload jams: when a reload finishes, the actor animation code (0x71F94D) looks up the gun's
 // reload jam chance for its condition (0x583720(condition index from process vfunc 0x364)) and,
 // if it is above 0, rolls it (0x491770, called at 0x720179); a hit plays the Jam group. That roll
-// is hooked (with the actor, through GFO_JamRollThunk) so the crosshair can stay closed exactly
+// is hooked (with the actor, through FLOW_JamRollThunk) so the crosshair can stay closed exactly
 // until it is known whether a jam follows the reload.
 static bool    g_jamHookOk;
 static int64_t g_jamRollQpc;    // the player's last reload jam roll...
 static bool    g_jamRollHit;    // ...and whether it jammed
-extern "C" bool __cdecl GFO_JamRoll(float chance, void* actor)
+extern "C" bool __cdecl FLOW_JamRoll(float chance, void* actor)
 {
 	const bool hit = ((bool(__cdecl*)(float))0x00491770)(chance);
 	if (actor && actor == Player()) {
@@ -2472,14 +2472,14 @@ extern "C" bool __cdecl GFO_JamRoll(float chance, void* actor)
 	}
 	return hit;
 }
-extern "C" void GFO_JamRollThunk();  // the call at 0x720179: chance on the stack, actor in esi
+extern "C" void FLOW_JamRollThunk();  // the call at 0x720179: chance on the stack, actor in esi
 __asm__(
 	".text\n"
-	".globl _GFO_JamRollThunk\n"
-	"_GFO_JamRollThunk:\n"
+	".globl _FLOW_JamRollThunk\n"
+	"_FLOW_JamRollThunk:\n"
 	"	pushl %esi\n"
 	"	pushl 8(%esp)\n"
-	"	call _GFO_JamRoll\n"
+	"	call _FLOW_JamRoll\n"
 	"	addl $8, %esp\n"
 	"	ret\n");
 
@@ -3549,7 +3549,7 @@ __declspec(dllexport) bool FOSEPlugin_Load(const FOSEInterface* fose)
 		const uint8_t dead[] = { 0x80, 0x7C, 0x24, 0x04, 0x00, 0x8B, 0x81, 0xFC, 0x00, 0x00, 0x00 };
 		g_lifeStateOk = memcmp((const void*)addr::kIsDead, dead, sizeof(dead)) == 0;
 		if (!g_lifeStateOk)
-			Log("WARNING: Actor::IsDead does not match; GFO cannot tell when the player dies");
+			Log("WARNING: Actor::IsDead does not match; FLOW cannot tell when the player dies");
 	}
 
 	if (g_cfg.xh.enabled) {
@@ -3597,13 +3597,13 @@ __declspec(dllexport) bool FOSEPlugin_Load(const FOSEInterface* fose)
 				Log("WARNING: projectile creation or VATS state do not match; third person shots stay vanilla");
 			}
 			{
-				// reload jam roll (see GFO_JamRoll): push edi; call 0x583720; fstp [esp]; call 0x491770
+				// reload jam roll (see FLOW_JamRoll): push edi; call 0x583720; fstp [esp]; call 0x491770
 				const uint8_t jam[] = { 0x57, 0xE8, 0xAA, 0x35, 0xE6, 0xFF, 0xD9, 0x1C, 0x24, 0xE8, 0xF2, 0x15, 0xD7, 0xFF };
 				const uintptr_t jc = 0x00720179;
 				if (g_cfg.xh.reloadClosed && memcmp((const void*)(jc - 9), jam, sizeof(jam)) == 0) {
 					DWORD old;
 					VirtualProtect((void*)jc, 5, PAGE_EXECUTE_READWRITE, &old);
-					*(int32_t*)(jc + 1) = (int32_t)((uintptr_t)&GFO_JamRollThunk - (jc + 5));
+					*(int32_t*)(jc + 1) = (int32_t)((uintptr_t)&FLOW_JamRollThunk - (jc + 5));
 					VirtualProtect((void*)jc, 5, old, &old);
 					FlushInstructionCache(GetCurrentProcess(), (void*)jc, 5);
 					g_jamHookOk = true;
@@ -3649,7 +3649,7 @@ __declspec(dllexport) bool FOSEPlugin_Load(const FOSEInterface* fose)
 					DWORD old;
 					VirtualProtect((void*)at2, 6, PAGE_EXECUTE_READWRITE, &old);
 					*(uint8_t*)at2 = 0xE9;
-					*(int32_t*)(at2 + 1) = (int32_t)((uintptr_t)&GFO_VanityMouseStub - (at2 + 5));
+					*(int32_t*)(at2 + 1) = (int32_t)((uintptr_t)&FLOW_VanityMouseStub - (at2 + 5));
 					*(uint8_t*)(at2 + 5) = 0x90;
 					VirtualProtect((void*)at2, 6, old, &old);
 					FlushInstructionCache(GetCurrentProcess(), (void*)at2, 6);
