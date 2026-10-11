@@ -263,6 +263,8 @@ struct CameraConfig {               // times in seconds
 	int   shoulderKey   = VK_MBUTTON;
 	float shoulderTime  = 0.167f;
 	bool  vanityFix     = true;     // vanity camera orbits keep the player on the same screen side
+	float viewSwitch    = 0.35f;    // first <-> third person: the camera glides between the eyes and
+	                                // the third person spot in this long, eased (0 = vanilla)
 };
 
 struct CrosshairConfig {
@@ -515,6 +517,9 @@ static void LoadConfig()
 	c.shoulderKey   = GetPrivateProfileIntA("Camera", "iShoulderSwapKey", c.shoulderKey, path);
 	c.shoulderTime  = IniFloat(path, "Camera", "fShoulderSwapMs", c.shoulderTime * 1000.0f) / 1000.0f;
 	clampf(c.shoulderTime, 0.0f, 3.0f);
+	c.viewSwitch    = IniFloat(path, "Camera", "fViewSwitchMs", c.viewSwitch * 1000.0f) / 1000.0f;
+	clampf(c.viewSwitch, 0.0f, 2.0f);
+	Log("config: Camera: fViewSwitchMs=%.0f", c.viewSwitch * 1000.0f);
 	Log("config: Camera: bEnabled=%d fVerticalLagMs=%.0f bVanityOrbitFix=%d bShoulderSwap=%d iShoulderSwapKey=0x%X "
 	    "fShoulderSwapMs=%.0f", c.enabled, c.vertLag * 1000.0f, c.vanityFix, c.shoulderSwap, c.shoulderKey,
 	    c.shoulderTime * 1000.0f);
@@ -2007,9 +2012,8 @@ static void UpdateShoulder(double dt)
 
 static float Length(const NiPoint3& v) { return std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z); }
 
-static void SmoothCamera(NiAVObject* node, double dt)
+static void CheckCameraParent(NiAVObject* node)
 {
-	const CameraConfig& cc = g_cfg.cam;
 	if (!cam.parentChecked) {
 		// The node's local position must be in world space (parent at the origin, unrotated).
 		cam.parentChecked = true;
@@ -2024,6 +2028,12 @@ static void SmoothCamera(NiAVObject* node, double dt)
 		Log(ok ? "camera node %p: world space, smoothing active"
 		       : "WARNING: camera node %p is not in world space; smoothing disabled", (void*)node);
 	}
+}
+
+static void SmoothCamera(NiAVObject* node, double dt)
+{
+	const CameraConfig& cc = g_cfg.cam;
+	CheckCameraParent(node);
 	if (!cam.parentOk) return;
 
 	uint8_t* pc = (uint8_t*)Player();
@@ -2082,6 +2092,142 @@ static void SmoothCamera(NiAVObject* node, double dt)
 }
 
 typedef void(__thiscall* NiAVObjectUpdate_t)(NiAVObject*, void*);
+// First <-> third person switch. Vanilla: going out, the camera jumps ~50 units out of the head,
+// then slides linearly to the third person distance in ~0.1 s and stops dead; coming back, the
+// same in reverse, then pops into the head. The view state: player +0x5A8 = third person now,
+// +0x5AA = wanted; while they differ the game changes the camera distance (0x107BA18) and flips
+// +0x5A8 once it is there. Instead: going out, the game's distance is set at once (so it computes
+// the final third person spot) and the camera glides from the eyes to it; coming back, the game's
+// distance is held so it doesn't switch yet, the camera glides from the third person spot into the
+// eyes, and then the distance is dropped so the game switches. Both glides ease in and out; a
+// switch back halfway reverses from where the camera is.
+namespace addr { constexpr uintptr_t kCamDistance = 0x0107BA18; }  // current third person distance
+static struct PovState {
+	bool     active = false;
+	int      dir = 0;               // +1 going to third person, -1 going to first person
+	float    t = 0.0f;              // 0..1 through the glide
+	float    hold = 0.0f;           // third person distance held while gliding in
+	NiPoint3 eyeLocal = {};         // eyes relative to the player (x right, y forward, z up)
+	bool     eyeOk = false;
+	bool     released = false;      // glide in done: the game may switch
+} pov;
+
+// Every frame in first person: where the eyes are (the first person camera node), relative to
+// the player, in the player's heading frame.
+static void PovRecordEye()
+{
+	uint8_t* pc = (uint8_t*)Player();
+	if (!pc || pc[0x5A8] || pc[0x5AA]) return;
+	NiAVObject* c1 = *(NiAVObject**)0x0107BA78;
+	if (!c1) return;
+	const NiPoint3 P = *(NiPoint3*)(pc + off::kRefrPos);
+	const float h = *(float*)(pc + off::kRefrRotZ), ch = std::cos(h), sh = std::sin(h);
+	const float dx = c1->world.pos.x - P.x, dy = c1->world.pos.y - P.y, dz = c1->world.pos.z - P.z;
+	if (dx * dx + dy * dy > 60.0f * 60.0f || dz < 10.0f || dz > 200.0f) return;  // not a sensible eye spot
+	pov.eyeLocal = { dx * ch - dy * sh, dx * sh + dy * ch, dz };
+	pov.eyeOk = true;
+}
+
+static void PovTransition(NiAVObject* node, double dt)
+{
+	uint8_t* pc = (uint8_t*)Player();
+	const float T = g_cfg.cam.viewSwitch;
+	CheckCameraParent(node);
+	if (!pc || T <= 0.0f || !pov.eyeOk || !cam.parentOk) { pov.active = false; return; }
+	const bool now3 = pc[0x5A8] != 0, want3 = pc[0x5AA] != 0;
+	// Not for VATS, menus (dialogue...) or a ragdoll: vanilla there. (The vanity flag is set for a
+	// moment by the view key itself, so it isn't checked; the vanity orbit never switches views.)
+	if (*(int*)addr::kVATSMode != 0 || ((bool(__cdecl*)())addr::kIsMenuMode)() || PlayerRagdollReason()) {
+		pov.active = false;
+		return;
+	}
+	float& dist = *(float*)addr::kCamDistance;
+	// A glide in that let the game switch is over once the game is in first person, even if the
+	// next tap came before a first person frame (this hook only runs while the third person camera
+	// does); and any glide this hook hasn't seen for a moment is stale.
+	static int64_t lastCall;
+	const int64_t nowQpc = QpcNow();
+	if (pov.active && ((pov.released && !now3) || (double)(nowQpc - lastCall) / g_qpcFreq > 0.1)) {
+		pov.active = false;
+		if (g_cfg.debug) Log("view switch: previous glide over (game reached first person)");
+	}
+	lastCall = nowQpc;
+	// the third person distance while settled there: what a glide in holds the game at
+	if (now3 && want3 && !pov.active && dist > 1.0f && dist < 2000.0f) pov.hold = dist;
+	if (pov.hold < 1.0f) pov.hold = std::fmax(60.0f, *(float*)0x0107BDBC);  // not seen yet: the zoom setting
+	if (!pov.active) {
+		// safety net: settled in third person with the distance dropped (a glide in released at
+		// the very moment it was turned round) - put the third person distance back
+		if (now3 && want3 && dist < 1.0f) dist = pov.hold;
+		if (now3 == want3) return;
+		pov.active = true;
+		pov.dir = want3 ? 1 : -1;
+		pov.t = 0.0f;
+		pov.released = false;
+		if (g_cfg.debug) Log("view switch: start, to %s person (distance %.1f)", want3 ? "third" : "first", dist);
+		dt = 0.0;
+	} else if ((want3 ? 1 : -1) != pov.dir && (now3 || !pov.released)) {  // switched back halfway: reverse
+		// (also right after a glide in let the game switch, as long as it is still in third person)
+		pov.dir = -pov.dir;
+		pov.t = 1.0f - pov.t;
+		if (pov.released) {
+			pov.released = false;
+			if (dist < pov.hold) dist = pov.hold;
+		}
+		if (g_cfg.debug) Log("view switch: reversed, now to %s person", want3 ? "third" : "first");
+	}
+	if (now3 == want3 && (pov.dir > 0 ? pov.t >= 1.0f : !now3)) {  // done
+		pov.active = false;
+		if (g_cfg.debug) Log("view switch: done");
+		return;
+	}
+	pov.t = std::fmin(1.0f, pov.t + (float)(std::fmin(dt, 0.05) / T));
+	if (pov.dir > 0) {
+		// while the game is still zooming out itself, it finishes at once (clamped to its target);
+		// once it is settled the distance is left alone (a huge value left there would make the
+		// next zoom-in end at once)
+		if (now3 != want3) dist = 99999.0f;
+	} else {
+		if (pov.t < 1.0f) {
+			if (dist < pov.hold) dist = pov.hold;  // keep the game from switching yet
+		} else {
+			dist = 0.0f;  // glide done: let the game switch now
+			pov.released = true;
+		}
+	}
+	const float u = pov.dir > 0 ? pov.t : 1.0f - pov.t;
+	const float f = u * u * (3.0f - 2.0f * u);  // eased: 0 = eyes, 1 = the game's third person spot
+	const NiPoint3 P = *(NiPoint3*)(pc + off::kRefrPos);
+	const float h = *(float*)(pc + off::kRefrRotZ), ch = std::cos(h), sh = std::sin(h);
+	const NiPoint3& e = pov.eyeLocal;
+	const NiPoint3 eye = { P.x + e.x * ch + e.y * sh, P.y - e.x * sh + e.y * ch, P.z + e.z };
+	NiPoint3& c = node->local.pos;
+	c = { eye.x + (c.x - eye.x) * f, eye.y + (c.y - eye.y) * f, eye.z + (c.z - eye.z) * f };
+}
+
+// The view key (0x78A420): on press the game always asks for third person (SetFirstPerson(false),
+// 0x775430, at 0x78A4BE; the hold-to-orbit camera starts), and on a quick release it switches to
+// first person if the third person body was showing at the press (0x78A5AA). During a glide into
+// first person the body still shows, so a tap would turn the glide round on the press and back
+// again on the release. So a release doesn't switch when that same press already changed the view.
+typedef bool(__thiscall* SetFirstPerson_t)(void*, bool);
+static bool g_povPressChanged;
+static bool __fastcall Hook_PovKeyPress(void* pc, void* /*edx*/, bool firstPerson)
+{
+	const bool changed = ((SetFirstPerson_t)0x00775430)(pc, firstPerson);
+	g_povPressChanged = changed;
+	return changed;
+}
+static bool __fastcall Hook_PovKeyRelease(void* pc, void* /*edx*/, bool firstPerson)
+{
+	if (g_povPressChanged && g_cfg.cam.viewSwitch > 0.0f) {
+		g_povPressChanged = false;
+		if (g_cfg.debug) Log("view switch: key release kept the direction the press chose");
+		return false;
+	}
+	return ((SetFirstPerson_t)0x00775430)(pc, firstPerson);
+}
+
 static void __fastcall Hook_CameraUpdate(NiAVObject* node, void* /*edx*/, void* updateData)
 {
 	LARGE_INTEGER li;
@@ -2094,6 +2240,7 @@ static void __fastcall Hook_CameraUpdate(NiAVObject* node, void* /*edx*/, void* 
 	// Death/knockdown camera stays vanilla (it follows the ragdoll).
 	if (node && InThirdPerson() && !PlayerRagdollReason()) SmoothCamera(node, dt);
 	else cam.init = false;
+	if (node && g_cfg.cam.viewSwitch > 0.0f) PovTransition(node, dt);
 	((NiAVObjectUpdate_t)addr::kNiAVObjectUpdate)(node, updateData);
 }
 
@@ -2833,6 +2980,7 @@ static void VanillaCrosshairState(bool* hostile, bool* filled)
 
 static void DrawCrosshair(IDirect3DDevice9* dev)
 {
+	PovRecordEye();
 	const CrosshairConfig& cc = g_cfg.xh;
 	IDirect3DSurface9* bb = nullptr;
 	if (FAILED(dev->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &bb)) || !bb) return;
@@ -3422,6 +3570,26 @@ __declspec(dllexport) bool FOSEPlugin_Load(const FOSEInterface* fose)
 			VirtualProtect((void*)at, 5, old, &old);
 			FlushInstructionCache(GetCurrentProcess(), (void*)at, 5);
 			Log("hooked third person camera update at %08X", (unsigned)at);
+			if (g_cfg.cam.viewSwitch > 0.0f) {
+				const uintptr_t sites[2] = { 0x0078A4BE, 0x0078A5AA };
+				void* const fns[2] = { (void*)&Hook_PovKeyPress, (void*)&Hook_PovKeyRelease };
+				bool ok = true;
+				for (uintptr_t a : sites)
+					ok = ok && *(uint8_t*)a == 0xE8 && a + 5 + *(int32_t*)(a + 1) == 0x00775430;
+				if (ok) {
+					for (int n = 0; n < 2; ++n) {
+						const uintptr_t a = sites[n];
+						DWORD old;
+						VirtualProtect((void*)a, 5, PAGE_EXECUTE_READWRITE, &old);
+						*(int32_t*)(a + 1) = (int32_t)((uintptr_t)fns[n] - (a + 5));
+						VirtualProtect((void*)a, 5, old, &old);
+						FlushInstructionCache(GetCurrentProcess(), (void*)a, 5);
+					}
+					Log("hooked the view key's first/third person calls at 0078A4BE/0078A5AA");
+				} else {
+					Log("WARNING: view key code does not match; a tap during a view glide may not reverse it");
+				}
+			}
 		} else {
 			Log("WARNING: camera update call not found; camera features disabled");
 		}
