@@ -258,6 +258,7 @@ struct MoveConfig {                 // angles in radians, times in seconds
 
 struct CameraConfig {               // times in seconds
 	bool  enabled       = true;
+	float vertLag       = 0.15f;    // the camera follows the player's height through a spring this slow
 	bool  shoulderSwap  = true;
 	int   shoulderKey   = VK_MBUTTON;
 	float shoulderTime  = 0.167f;
@@ -489,12 +490,15 @@ static void LoadConfig()
 	CameraConfig& c = g_cfg.cam;
 	c.enabled       = b("Camera", "bEnabled", c.enabled);
 	c.vanityFix     = b("Camera", "bVanityOrbitFix", c.vanityFix);
+	c.vertLag       = IniFloat(path, "Camera", "fVerticalLagMs", c.vertLag * 1000.0f) / 1000.0f;
+	clampf(c.vertLag, 0.0f, 1.0f);
 	c.shoulderSwap  = b("Camera", "bShoulderSwap", c.shoulderSwap);
 	c.shoulderKey   = GetPrivateProfileIntA("Camera", "iShoulderSwapKey", c.shoulderKey, path);
 	c.shoulderTime  = IniFloat(path, "Camera", "fShoulderSwapMs", c.shoulderTime * 1000.0f) / 1000.0f;
 	clampf(c.shoulderTime, 0.0f, 3.0f);
-	Log("config: Camera: bEnabled=%d bVanityOrbitFix=%d bShoulderSwap=%d iShoulderSwapKey=0x%X fShoulderSwapMs=%.0f",
-	    c.enabled, c.vanityFix, c.shoulderSwap, c.shoulderKey, c.shoulderTime * 1000.0f);
+	Log("config: Camera: bEnabled=%d fVerticalLagMs=%.0f bVanityOrbitFix=%d bShoulderSwap=%d iShoulderSwapKey=0x%X "
+	    "fShoulderSwapMs=%.0f", c.enabled, c.vertLag * 1000.0f, c.vanityFix, c.shoulderSwap, c.shoulderKey,
+	    c.shoulderTime * 1000.0f);
 
 	GetPrivateProfileStringA("Skeleton", "sBodyNode", g_cfg.bodyNode, g_cfg.bodyNode, sizeof(g_cfg.bodyNode), path);
 	g_cfg.footIKOff = b("Skeleton", "bDisableFootIKWhenTurned", g_cfg.footIKOff);
@@ -2015,11 +2019,10 @@ static void SmoothCamera(NiAVObject* node, double dt)
 	// tried at 30 and 100 ms and dropped both times, 2026-10-09).
 	cam.follow.x = P.x;
 	cam.follow.y = P.y;
-	// (Height smoothing here, fFollowSmoothVerticalMs, and stair smoothing in both views were tried
-	// and removed at the user's request, 2026-10-12: stairs in this game differ too much, some are
-	// slopes in disguise, some have glitchy steps.)
-	(void)dt;
-	cam.follow.z = P.z;
+	// Height: through a spring ([Camera] fVerticalLagMs), so on a jump the player rises ahead of the
+	// camera and drops ahead of it again; stairs and bumps are softened too. (Third person only;
+	// first person height smoothing was tried and removed 2026-10-12, the gun kept moving on stairs.)
+	cam.follow.z = cc.vertLag > 0.0f ? SmoothDamp(cam.follow.z, P.z, &cam.followVel.z, dt, cc.vertLag) : P.z;
 	NiPoint3 S = { T.x + cam.follow.x - P.x, T.y + cam.follow.y - P.y, T.z + cam.follow.z - P.z };
 
 	// (Easing the camera back out after walls was tried three ways and dropped, 2026-10-10: vanilla

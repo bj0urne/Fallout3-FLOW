@@ -17,6 +17,7 @@ Everything is done in the engine at runtime: no custom skeleton, no animation re
 - **Waist twist:** the twist between legs and torso is spread up the spine instead of all at the hips.
 
 ### Camera (third person)
+- Vertical lag: the camera follows your height with a soft spring, so on a jump you rise and drop ahead of it; stairs and bumps are softened too. Mouse look is never smoothed.
 - Shoulder swap on a key (middle mouse button by default).
 - The vanity camera (holding the POV key) keeps the player on the same side of the screen.
 
