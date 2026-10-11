@@ -21,7 +21,7 @@ Everything is done in the engine at runtime: no custom skeleton, no animation re
 - Smooth view switch: switching between first and third person glides the camera out of your eyes to the third person spot and back in, easing in and out. Pressing the key again mid-glide turns it round smoothly.
 - Smooth wheel zoom: each mouse wheel step glides to the new distance instead of jumping.
 - Shoulder swap on a key (middle mouse button by default).
-- The vanity camera (holding the POV key) keeps the player on the same side of the screen.
+- The vanity camera (holding the POV key) keeps the player on the same side of the screen, and the mouse turns it like normal aiming.
 
 ### Crosshair and aiming
 - **Dynamic crosshair:** the game's own crosshair, split in two, opens up to show your gun's actual spread. The spread includes weapon accuracy, condition, skill, crippled limbs, aiming, crouching, moving and perks. Drawing a gun opens it out to your spread and fades in the centre dot; holstering closes it again. With no gun drawn it replaces the vanilla crosshair, closed and without the dot. Every shot pulls it in toward the centre and back out. It closes while you reload, and stays closed through a reload jam (FCCO waits for the game's jam roll). It hides in scopes, in VATS and when you die. There's also a four-line style, with colour, size and outline options.

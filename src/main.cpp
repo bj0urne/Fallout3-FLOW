@@ -266,6 +266,7 @@ struct CameraConfig {               // times in seconds
 	float viewSwitch    = 0.35f;    // first <-> third person: the camera glides between the eyes and
 	                                // the third person spot in this long, eased (0 = vanilla)
 	float zoomSmooth    = 0.15f;    // mouse wheel zoom: each step glides over about this long (0 = vanilla)
+	bool  vanityMouse   = true;     // vanity camera: the mouse turns it like normal aiming
 };
 
 struct CrosshairConfig {
@@ -522,7 +523,9 @@ static void LoadConfig()
 	clampf(c.viewSwitch, 0.0f, 2.0f);
 	c.zoomSmooth    = IniFloat(path, "Camera", "fZoomSmoothMs", c.zoomSmooth * 1000.0f) / 1000.0f;
 	clampf(c.zoomSmooth, 0.0f, 2.0f);
-	Log("config: Camera: fViewSwitchMs=%.0f fZoomSmoothMs=%.0f", c.viewSwitch * 1000.0f, c.zoomSmooth * 1000.0f);
+	c.vanityMouse   = b("Camera", "bVanityMouseLikeAim", c.vanityMouse);
+	Log("config: Camera: fViewSwitchMs=%.0f fZoomSmoothMs=%.0f bVanityMouseLikeAim=%d", c.viewSwitch * 1000.0f,
+	    c.zoomSmooth * 1000.0f, c.vanityMouse);
 	Log("config: Camera: bEnabled=%d fVerticalLagMs=%.0f bVanityOrbitFix=%d bShoulderSwap=%d iShoulderSwapKey=0x%X "
 	    "fShoulderSwapMs=%.0f", c.enabled, c.vertLag * 1000.0f, c.vanityFix, c.shoulderSwap, c.shoulderKey,
 	    c.shoulderTime * 1000.0f);
@@ -2140,6 +2143,42 @@ static void UpdateZoomSmooth()
 	g_zoomSmooth = SmoothDamp(g_zoomSmooth, real, &g_zoomVel, dt, g_cfg.cam.zoomSmooth * 0.5f);
 }
 
+// Vanity camera mouse (0x77C45E): vanilla turns the orbit by mouse counts x (pi/180) x
+// fVanityModeXMult (30) / YMult (10) x the frame time, so it ignores the mouse sensitivity, turns
+// less the higher the framerate, and up/down is three times slower than left/right. Normal aiming
+// (0x77C5FF / 0x77C627) is counts x fMouseSensitivity (0x107BCE0, radians per count) x the zoom
+// factor ([esp+0x20]). The vanity code is replaced by that (same directions as vanilla); with a
+// gamepad (the 0x477B00 condition) the vanilla code runs. (Tried and reverted 2026-10-11: a tilt
+// limit, a glide back on release, and turning the player instead of the vanity angles.)
+extern "C" void __cdecl FCCO_VanityMouse(int dx, int dy, float fovFactor)
+{
+	float sens = *(float*)0x0107BCE0;
+	if (!(sens > 0.0f && sens < 1.0f)) sens = 0.002f;
+	if (!(fovFactor > 0.01f && fovFactor <= 1.0f)) fovFactor = 1.0f;
+	*(float*)0x0107BDC0 += (float)dx * sens * fovFactor;  // vanity yaw
+	*(float*)0x0107BDB8 += (float)dy * sens * fovFactor;  // vanity pitch
+}
+extern "C" void FCCO_VanityMouseStub();
+__asm__(
+	".text\n"
+	".globl _FCCO_VanityMouseStub\n"
+	"_FCCO_VanityMouseStub:\n"
+	"	cmpb $0, 0x01075B28\n"
+	"	je 1f\n"
+	"	cmpb $0, 0x01075CAC\n"
+	"	jne 1f\n"
+	"	cmpb %al, 0x01075B28\n"   // gamepad: the original instruction, then the vanilla code
+	"	pushl $0x0077C464\n"
+	"	ret\n"
+	"1:\n"
+	"	pushl 0x20(%esp)\n"       // zoom factor
+	"	pushl 0x18(%esp)\n"       // mouse y (was [esp+0x14])
+	"	pushl 0x20(%esp)\n"       // mouse x (was [esp+0x18])
+	"	call _FCCO_VanityMouse\n"
+	"	addl $12, %esp\n"
+	"	pushl $0x0077C64D\n"      // where the vanilla vanity code continues
+	"	ret\n");
+
 // Every frame in first person: where the eyes are (the first person camera node), relative to
 // the player, in the player's heading frame.
 static void PovRecordEye()
@@ -3599,6 +3638,26 @@ __declspec(dllexport) bool FOSEPlugin_Load(const FOSEInterface* fose)
 			VirtualProtect((void*)at, 5, old, &old);
 			FlushInstructionCache(GetCurrentProcess(), (void*)at, 5);
 			Log("hooked third person camera update at %08X", (unsigned)at);
+			if (g_cfg.cam.vanityMouse) {
+				// cmp byte ptr [0x1075B28], al; fild dword ptr [esp+0x18]; ...; fld [fVanityModeXMult]
+				const uint8_t v[] = { 0x38, 0x05, 0x28, 0x5B, 0x07, 0x01, 0xDB, 0x44, 0x24, 0x18 };
+				const uint8_t v2[] = { 0xD9, 0x05, 0xD4, 0xE9, 0xF5, 0x00 };
+				const uint8_t v3[] = { 0xE9, 0x92, 0x01, 0x00, 0x00 };  // jmp 0x77C64D at 0x77C4B6
+				if (memcmp((const void*)0x0077C45E, v, sizeof(v)) == 0 && memcmp((const void*)0x0077C470, v2, sizeof(v2)) == 0 &&
+				    memcmp((const void*)0x0077C4B6, v3, sizeof(v3)) == 0) {
+					const uintptr_t at2 = 0x0077C45E;
+					DWORD old;
+					VirtualProtect((void*)at2, 6, PAGE_EXECUTE_READWRITE, &old);
+					*(uint8_t*)at2 = 0xE9;
+					*(int32_t*)(at2 + 1) = (int32_t)((uintptr_t)&FCCO_VanityMouseStub - (at2 + 5));
+					*(uint8_t*)(at2 + 5) = 0x90;
+					VirtualProtect((void*)at2, 6, old, &old);
+					FlushInstructionCache(GetCurrentProcess(), (void*)at2, 6);
+					Log("vanity camera mouse: like normal aiming (hooked 0077C45E)");
+				} else {
+					Log("WARNING: vanity camera mouse code does not match; it stays vanilla");
+				}
+			}
 			if (g_cfg.cam.zoomSmooth > 0.0f) {
 				// fdivr dword ptr [0x107BDBC] / fld dword ptr [0x107BDBC] in the third person camera
 				const uint8_t a[] = { 0xD8, 0x3D, 0xBC, 0xBD, 0x07, 0x01 }, b[] = { 0xD9, 0x05, 0xBC, 0xBD, 0x07, 0x01 };
