@@ -20,8 +20,7 @@ FLOW is a new (AI composed) FOSE plugin that reworks how your character moves, a
 [size=4][b]Third person[/b][/size][/color]
 
 [list]
-[*]
-[b]Natural movement:[/b] your body faces the direction you're moving. Turning while moving makes you lean into turns and your body lags behind slightly to give a natural feeling to movement. With a weapon drawn, turning around while still only turns your torso, until you turn far enough at which your legs also turn.[/*]
+[*][b]Natural movement:[/b] your body faces the direction you're moving. Turning while moving makes you lean into turns and your body lags behind slightly to give a natural feeling to movement. With a weapon drawn, turning around while still only turns your torso, until you turn far enough at which your legs also turn.[/*]
 [*][b]Vertical smoothness:[/b] the camera follows your height with a smooth delay, so on a jump you rise and drop ahead of it.[/*]
 [*][b]Free look (weapon holstered):[/b] camera can be moved around freely, and your character moves his head to look at what you're aiming at. Camera now naturally orbits the player instead of orbiting the crosshair as in the vanilla game, finally fixing vanity camera.[/*]
 [*][b]Acceleration:[/b] movement easing. Starting and stopping is smooth.[/*]
@@ -48,7 +47,6 @@ FLOW is a new (AI composed) FOSE plugin that reworks how your character moves, a
 [*][color=#D4D4D8][b]Smooth view switching[/b] between first and third person, and smooth zooming.[/color][/*]
 [/list]
 
-
 [line]
 
 
@@ -61,7 +59,6 @@ FLOW is a new (AI composed) FOSE plugin that reworks how your character moves, a
 [*][color=#D4D4D8][b][url=https://fose.silverlock.org/]Fallout Script Extender (FOSE)[/url][/b], 1.2b2 or newer[/color][/*]
 [*][color=#D4D4D8]Recommended: [b][url=https://www.nexusmods.com/fallout3/mods/27726]T.E.M.P.O.[/url][/b] for smooth play at high framerates.[/color][/*]
 [/list]
-
 
 [line]
 
@@ -84,7 +81,6 @@ Install with Vortex or Mod Organizer 2, or extract the archive into [i]Fallout 3
 [*][color=#D4D4D8]Safe to add to or remove from an existing save.[/color][/*]
 [*][color=#D4D4D8]Fallout 3 only. Not for New Vegas or Tale of Two Wastelands.[/color][/*]
 [/list]
-
 
 [line]
 
