@@ -31,7 +31,7 @@ FLOW is a new (AI composed) FOSE plugin that reworks how your character moves, a
 [size=4][b]First person[/b][/size][/color]
 
 [list]
-[*][color=#D4D4D8][b]Gun sway system:[/b] this mod features a sway system for your first person viewmodels. Looking around moves the weapon like it actually weighs something, moving bobs the weapon using the same sway system, and jumping/landing dips the weapon to give a sense of weight. All of these combined using the same system make gunplay feel much more fluid than the base game.[/color][/*]
+[*][color=#D4D4D8][b]Gun sway system:[/b] this mod features a sway system for your first person viewmodels. Looking around moves the weapon like it actually weighs something, moving bobs the weapon using the same sway system, jumping/landing dips the weapon to give a sense of weight, and automatic weapons kick back with every shot and sway side to side in rapid fire. All of these combined using the same system make gunplay feel much more fluid than the base game.[/color][/*]
 [/list]
 [color=#D4D4D8]
 [size=4][b]Crosshair and aiming[/b][/size][/color]

@@ -37,7 +37,7 @@
 
 #define PLUGIN_NAME        "FLOW"
 #define PLUGIN_VERSION     1
-#define PLUGIN_VERSION_STR "1.0.0"
+#define PLUGIN_VERSION_STR "1.1.0"
 
 // ---------------------------------------------------------------------------------------------
 // FOSE plugin interface (subset of fose/PluginAPI.h)
@@ -313,6 +313,13 @@ struct GunSwayConfig {
 	float vertTime = 0.06f;   // ...reacting within about this many seconds
 	float crouchDip = 1.5f;   // ...lower
 	float crouchLeft = 0.0f;  // ...and further to the left
+	bool  autoKick = true;    // automatic guns: no first person fire animation; a kick per shot instead
+	float kickBack = 9.0f;    // units the gun is kicked back toward the view per shot
+	float kickRise = 0.0f;    // ...and degrees the muzzle tips up (0 = straight back)
+	float kickSide = 1.5f;    // rapid fire sways the gun side to side this many degrees
+	float kickReturn = 0.25f; // seconds the gun takes to come back after a single shot (rapid fire: sooner)
+	float kickAim = 0.5f;     // share of the kick while aiming down the sights
+	float flameBack = 4.0f;   // flame weapons: units the gun slides back and holds while firing
 };
 
 static struct Config {
@@ -455,11 +462,27 @@ static void LoadConfig()
 	clampf(gs.crouchBack, -20.0f, 20.0f);
 	clampf(gs.crouchDip, 0.0f, 20.0f);
 	clampf(gs.crouchLeft, -20.0f, 20.0f);
+	gs.autoKick   = b("GunSway", "bAutomaticKick", gs.autoKick);
+	gs.kickBack   = IniFloat(path, "GunSway", "fShotKickBack", gs.kickBack);
+	gs.kickRise   = IniFloat(path, "GunSway", "fShotKickRise", gs.kickRise);
+	gs.kickSide   = IniFloat(path, "GunSway", "fShotKickSide", gs.kickSide);
+	clampf(gs.kickSide, 0.0f, 10.0f);
+	gs.kickReturn = IniFloat(path, "GunSway", "fShotKickReturnMs", gs.kickReturn * 1000.0f) / 1000.0f;
+	gs.kickAim    = IniFloat(path, "GunSway", "fShotKickAimMult", gs.kickAim);
+	gs.flameBack  = IniFloat(path, "GunSway", "fFlameKickBack", gs.flameBack);
+	clampf(gs.flameBack, -20.0f, 20.0f);
+	clampf(gs.kickBack, -20.0f, 20.0f);
+	clampf(gs.kickRise, -10.0f, 10.0f);
+	clampf(gs.kickReturn, 0.05f, 2.0f);
+	clampf(gs.kickAim, 0.0f, 2.0f);
 	Log("config: GunSway: bEnabled=%d fAmount=%.2f fCatchUpMs=%.0f fMaxDegrees=%.1f bSmoothJump=%d fJumpDip=%.1f "
 	    "fLandDip=%.1f bLockPitch=%d bSmoothSteps=%d fStepDip=%.2f fStepSway=%.2f fStrafeShift=%.2f fCrouchBack=%.2f "
 	    "fCrouchDip=%.2f fCrouchLeft=%.2f fVerticalShift=%.2f fVerticalShiftMs=%.0f", gs.enabled, gs.amount,
 	    gs.time * 1000.0f, gs.maxDeg, gs.smoothJump, gs.jumpDip, gs.landDip, gs.lockPitch, gs.smoothSteps, gs.stepDip,
 	    gs.stepSway, gs.strafeShift, gs.crouchBack, gs.crouchDip, gs.crouchLeft, gs.vertShift, gs.vertTime * 1000.0f);
+	Log("config: GunSway: bAutomaticKick=%d fShotKickBack=%.2f fShotKickRise=%.2f fShotKickSide=%.2f "
+	    "fShotKickReturnMs=%.0f fShotKickAimMult=%.2f fFlameKickBack=%.2f", gs.autoKick, gs.kickBack, gs.kickRise,
+	    gs.kickSide, gs.kickReturn * 1000.0f, gs.kickAim, gs.flameBack);
 
 	CrosshairConfig& x = g_cfg.xh;
 	x.enabled    = b("Crosshair", "bEnabled", x.enabled);
@@ -1521,6 +1544,18 @@ static struct SwayState {
 	float   crouch = 0.0f, crouchVel = 0.0f; // 0..1: how far into the crouch pose the gun is
 	float   lastZ = 0.0f, vz = 0.0f;         // player height last frame, smoothed vertical speed (units/s)
 	float   vert = 0.0f, vertVel = 0.0f;     // vertical slide (units, + = down)
+	// shot kick (automatic guns): 0..1 of the full kick, following a curve per shot
+	float   kick = 0.0f;                     // this frame's kick
+	float   kickFrom = 0.0f;                 // where the last shot's fling started
+	float   kickReturn = 0.25f;              // the last shot's return time (s)
+	int64_t kickQpc = 0;                     // when the last shot was fired (0 = no kick running)
+	int64_t lastShotQpc = 0;
+	float   kickW = 0.0f;                    // 0..1: the kick's own fade (it stays on while aiming)
+	float   kickSideTarget = 0.0f;           // where the side-to-side sway heads, -1..1 (+ = right)
+	float   kickSideCur = 0.0f, kickSideVel = 0.0f;  // the sway itself, following that smoothly
+	uint32_t kickRng = 0x9E3779B9u;
+	float   flame = 0.0f, flameVel = 0.0f;   // flame weapons: 0..1, how far into the held-back pose
+	int64_t lastFlameQpc = 0;                // the last flame projectile
 	NiAVObject* root = nullptr;            // first person skeleton the nodes below were found in
 	NiAVObject* head = nullptr;            // pivot
 	NiAVObject* arms[2] = {};              // left and right clavicle
@@ -1574,6 +1609,46 @@ static bool FindSwayNodes(NiAVObject* root)
 }
 
 // Advances the sway once a frame (the nodes may be updated more than once a frame).
+// A first person shot from an automatic gun (Hook_CreateProjectile): start a kick. The return time
+// is the time since the previous shot (a little less, so the gun is home before the next one); for
+// the first shot of a burst it comes from the gun's fire rate, capped at fShotKickReturnMs (single
+// shots). Flame weapons (flamer) don't kick: the gun slides back and holds while firing.
+static void GunSwayShot(bool flame, float shotsPerSec)
+{
+	const int64_t t = QpcNow();
+	if (flame) {  // flame weapons: no kicks, the gun just slides back and holds while firing
+		g_sway.lastFlameQpc = t;
+		if (g_cfg.debug) {
+			static int n;
+			if (n++ < 3) Log("gun sway: flame weapon firing (held back, no kicks)");
+		}
+		return;
+	}
+	const double since = g_sway.lastShotQpc ? (double)(t - g_sway.lastShotQpc) / g_qpcFreq : 1e9;
+	if (since < 0.008) return;  // the same shot (pellets)
+	g_sway.lastShotQpc = t;
+	if (g_cfg.debug && since >= 0.6) Log("gun sway: burst starts, fire rate %.1f shots/s", shotsPerSec);
+	float R = g_cfg.sway.kickReturn;
+	if (since < 0.6) R = std::fmin(R, (float)since * 0.85f);
+	// the first shot of a burst: the gun's fire rate says when the next one comes
+	else if (shotsPerSec > 1.0f && shotsPerSec < 60.0f) R = std::fmin(R, 0.85f / shotsPerSec);
+	g_sway.kickFrom = std::fmax(0.0f, std::fmin(1.0f, g_sway.kick));
+	// the side-to-side sway: each shot heads the other way, with a little random strength
+	g_sway.kickRng = g_sway.kickRng * 1664525u + 1013904223u;
+	const float strength = 0.6f + 0.4f * (((g_sway.kickRng >> 8) & 0xFFFF) / 65535.0f);
+	const float dir = g_sway.kickSideTarget > 0.0f ? -1.0f : g_sway.kickSideTarget < 0.0f ? 1.0f
+	                  : (((g_sway.kickRng >> 24) & 1) ? 1.0f : -1.0f);
+	g_sway.kickSideTarget = dir * strength;
+	g_sway.kickReturn = std::fmax(0.04f, R);
+	g_sway.kickQpc = t;
+	if (g_cfg.debug) {
+		static int n;
+		if (n++ < 30)
+			Log("gun sway: shot kick (%.0f ms since the last shot, returns in %.0f ms, from %.2f)", since * 1000.0,
+			    g_sway.kickReturn * 1000.0f, g_sway.kickFrom);
+	}
+}
+
 static void UpdateGunSway()
 {
 	uint8_t* pc = (uint8_t*)Player();
@@ -1724,6 +1799,41 @@ static void UpdateGunSway()
 			                                 : c.vertShift * rel;
 		}
 
+		// Shot kick (automatic guns, instead of their first person fire animation): each shot kicks
+		// the gun straight back to the full depth (a smooth ease-out over up to 50 ms, about a third
+		// of the time between shots), then it comes forward smoothly (ease-in-out) and is home again
+		// just as the next shot is due: the return time is set per shot from the time since the
+		// previous one (see GunSwayShot). A shot always kicks to the same depth from wherever the gun
+		// is, never on top of the last kick, so rapid fire can't push the gun away. Timed with the
+		// clock, so any framerate looks alike.
+		if (g_sway.kickQpc) {
+			const float el = (float)((double)(now - g_sway.kickQpc) / g_qpcFreq);
+			const float R = g_sway.kickReturn, A = std::fmin(0.05f, R * 0.3f);
+			if (el < A) {
+				const float u = el / A, e = 1.0f - (1.0f - u) * (1.0f - u) * (1.0f - u);
+				g_sway.kick = g_sway.kickFrom + (1.0f - g_sway.kickFrom) * e;
+			} else if (el < R) {
+				const float u = (el - A) / (R - A);
+				g_sway.kick = 1.0f - u * u * (3.0f - 2.0f * u);
+			} else {
+				g_sway.kick = 0.0f;
+				g_sway.kickQpc = 0;
+			}
+		}
+		// Flame weapons: while flame keeps coming out, the gun slides back and holds; when it stops,
+		// it eases forward again.
+		{
+			const bool firing = g_sway.lastFlameQpc && (double)(now - g_sway.lastFlameQpc) / g_qpcFreq < 0.2;
+			g_sway.flame = SmoothDamp(g_sway.flame, firing ? 1.0f : 0.0f, &g_sway.flameVel, dt, firing ? 0.08f : 0.2f);
+			if (!firing && g_sway.flame < 1e-3f) g_sway.flame = g_sway.flameVel = 0.0f;
+		}
+
+		// Rapid fire sways the gun side to side: each shot sends it the other way (see GunSwayShot),
+		// and it glides there; once the gun is home after the last shot it glides back to centre.
+		if (!g_sway.kickQpc) g_sway.kickSideTarget = 0.0f;
+		g_sway.kickSideCur = SmoothDamp(g_sway.kickSideCur, g_sway.kickSideTarget, &g_sway.kickSideVel, dt,
+		                                std::fmax(0.05f, g_sway.kickReturn * 0.5f));
+
 		// The dip spring (jump, landing): about 0.45 s per bounce, settling quickly.
 		{
 			const float acc = -kDipW * kDipW * g_sway.dip - 2.0f * 0.55f * kDipW * g_sway.dipVel;
@@ -1763,6 +1873,11 @@ static void UpdateGunSway()
 		                    !((bool(__cdecl*)())addr::kIsMenuMode)() && *(int*)addr::kVATSMode == 0 &&
 		                    !PlayerRagdollReason();
 		g_sway.weight = Approach(g_sway.weight, active ? 1.0f : 0.0f, dt, 0.1f);
+		// the shot kick also shows while aiming down the sights (scaled by fShotKickAimMult)
+		const bool kickOn = !InThirdPerson() && PlayerWeaponOut() && !((bool(__cdecl*)())addr::kIsMenuMode)() &&
+		                    *(int*)addr::kVATSMode == 0 && !PlayerRagdollReason();
+		const float kickTarget = !kickOn ? 0.0f : (g_swayChecksOk && PlayerAiming()) ? c.kickAim : 1.0f;
+		g_sway.kickW = Approach(g_sway.kickW, kickTarget, dt, 0.1f);
 
 		g_sway.oh = g_sway.lagH * g_sway.weight;  // + = gun points right of the view
 		g_sway.op = g_sway.lagP * g_sway.weight;  // + = gun points below the view
@@ -1793,8 +1908,12 @@ static void ApplyGunSwayTo(NiAVObject* node)
 	const float side = (c_stepSide() * g_sway.stepAmp * std::sin(kPi * g_sway.stepPhase) + g_sway.strafe -
 	                    g_sway.crouch * g_cfg.sway.crouchLeft) * g_sway.weight;
 	const float dip = (g_sway.dip + step + g_sway.crouch * g_cfg.sway.crouchDip + g_sway.vert) * g_sway.weight;
-	const float oh = g_sway.oh, op = g_sway.op + dip * 0.6f * kDegToRad;  // dipping tilts the gun down a bit
-	const float back = g_sway.crouch * g_cfg.sway.crouchBack * g_sway.weight;  // toward the view
+	const float kick = g_sway.kick * g_sway.kickW;
+	const float oh = g_sway.oh + g_sway.kickSideCur * g_sway.kickW * g_cfg.sway.kickSide * kDegToRad,  // rapid fire sway
+	            op = g_sway.op + dip * 0.6f * kDegToRad  // dipping tilts the gun down a bit
+	                                 - kick * g_cfg.sway.kickRise * kDegToRad;  // a shot tips it up
+	const float back = g_sway.crouch * g_cfg.sway.crouchBack * g_sway.weight +  // toward the view
+	                   kick * g_cfg.sway.kickBack + g_sway.flame * g_sway.kickW * g_cfg.sway.flameBack;
 	if (std::fabs(oh) < 1e-5f && std::fabs(op) < 1e-5f && std::fabs(dip) < 1e-3f && std::fabs(side) < 1e-3f &&
 	    std::fabs(back) < 1e-3f)
 		return;
@@ -1827,6 +1946,12 @@ static void ApplyGunSwayTo(NiAVObject* node)
 // is not enough: once the idle has blended out, a lone sequence is applied at full strength.) The
 // walk/run animations only move Bip01, Bip01 Translate/Rotate and Camera1st, and carry the
 // footstep text keys ("Enum: Left/Right"); those footsteps are played by the step bob instead.
+// Automatic guns (bAutomaticKick): their first person fire animations (Attack*, including the
+// aim-down-sights ones) are skipped too; each shot kicks the gun back instead (GunSwayShot). The
+// shots themselves still come from the body's animation, so firing is unaffected. The minigun's
+// spin animations (AttackSpin, AttackSpin2) are kept: they spin its barrels.
+static bool PlayerGunAutomatic();
+static bool g_shotHookOk;  // projectile creation hooked (the shots are seen)
 extern "C" void FLOW_PlayAnimGroupOrig();  // the original's first two instructions, then the rest of it
 __asm__(
 	".text\n"
@@ -1866,9 +1991,12 @@ static void* __fastcall Hook_PlayAnimGroup(uint8_t* animData, void* /*edx*/, uin
 	const bool jump = g_cfg.sway.smoothJump &&
 	                  ((g >= 168 && g <= 170) || (g >= 174 && g <= 177) || (g >= 179 && g <= 182));
 	const bool walk = g_cfg.sway.smoothSteps && g >= 3 && g <= 10;  // Forward..FastRight
-	if (!g_cfg.sway.enabled || !animData || (!jump && !walk)) return orig(animData, groupId, now, a3, a4);
+	// AttackLeft..AttackLoopISDown; not AttackSpin/AttackSpin2 (80-91): those spin the minigun's barrels
+	const bool fire = g_cfg.sway.autoKick && g_shotHookOk && g >= 26 && g <= 79;
+	if (!g_cfg.sway.enabled || !animData || (!jump && !walk && !fire)) return orig(animData, groupId, now, a3, a4);
 	NiAVObject* fp = FirstPersonRoot();
 	if (!fp || *(NiAVObject**)(animData + 8) != fp) return orig(animData, groupId, now, a3, a4);
+	if (fire && !PlayerGunAutomatic()) return orig(animData, groupId, now, a3, a4);
 	if (g_cfg.debug) {
 		// counted per second too: a skipped group the game asks for again every frame would show here
 		static int n, perSec;
@@ -1880,7 +2008,8 @@ static void* __fastcall Hook_PlayAnimGroup(uint8_t* animData, void* /*edx*/, uin
 			perSec = 0;
 		}
 		++perSec;
-		if (n++ < 12) Log("gun sway: first person %s animation group %u skipped", jump ? "jump" : "walk/run", g);
+		if (n++ < 24)
+			Log("gun sway: first person %s animation group %u skipped", jump ? "jump" : walk ? "walk/run" : "fire", g);
 	}
 	return nullptr;
 }
@@ -2334,12 +2463,18 @@ struct WeapData {                         // TESObjectWEAP (FOSE GameForms.h)
 	uint8_t pad[0xF4];
 	uint8_t type;                         // F4  3..9 = guns
 	uint8_t padF5[0x100 - 0xF5];
-	uint8_t flags1;                       // 100 0x4 = has scope
+	uint8_t flags1;                       // 100 0x2 = automatic, 0x4 = has scope
 	uint8_t pad101[0x104 - 0x101];
 	float   minSpread;                    // 104 degrees
 	float   spread;                       // 108 degrees
 	uint32_t pad10C;
 	float   sightFOV;                     // 110
+	uint32_t pad114;
+	uint8_t* projectile;                  // 118 BGSProjectile (+0x60 & 0xF0000: 0x80000 = flame)
+	uint8_t pad11C[0x134 - 0x11C];
+	float   fireRate;                     // 134 shots per second (automatic)
+	uint8_t pad138[0x14C - 0x138];
+	float   animShotsPerSec;              // 14C
 };
 
 static WeapData* PlayerGun()
@@ -2352,6 +2487,12 @@ static WeapData* PlayerGun()
 	if (!form || form[4] != 0x28) return nullptr;  // kFormType_Weapon
 	WeapData* w = (WeapData*)form;
 	return (w->type >= 3 && w->type <= 9) ? w : nullptr;
+}
+
+static bool PlayerGunAutomatic()
+{
+	const WeapData* w = PlayerGun();
+	return w && (w->flags1 & 0x2);
 }
 
 // Right edge of the camera's view frustum (= tan of half the horizontal FOV), or 0 if unknown.
@@ -3275,7 +3416,16 @@ static void* __cdecl Hook_CreateProjectile(uint32_t a0, uint32_t shooter, uint32
 	                                                           bits(heading), bits(pitch), a9, a10, a11, a12, a13,
 	                                                           a14, a15);
 	if (moved && proj && g_cfg.xh.hideTracers) HideTracer((uint8_t*)proj, (uint8_t*)(uintptr_t)a0);
-	if (proj && shooter == (uint32_t)(uintptr_t)Player()) ++xh.shots;  // the crosshair's shot pulse
+	if (proj && shooter == (uint32_t)(uintptr_t)Player()) {
+		++xh.shots;  // the crosshair's shot pulse
+		if (g_cfg.sway.enabled && g_cfg.sway.autoKick && !InThirdPerson() && PlayerGunAutomatic()) {
+			const WeapData* w = PlayerGun();
+			const uint8_t* pf = (const uint8_t*)(uintptr_t)a0;  // the projectile's form
+			const bool flame = pf && (*(const uint32_t*)(pf + 0x60) & 0xF0000) == 0x80000;
+			const float rate = w->fireRate > 0.0f ? w->fireRate : w->animShotsPerSec;
+			GunSwayShot(flame, rate);
+		}
+	}
 	return proj;
 }
 
@@ -3583,18 +3733,21 @@ __declspec(dllexport) bool FOSEPlugin_Load(const FOSEInterface* fose)
 			g_vatsOk = memcmp((const void*)0x005122DF, vats, sizeof(vats)) == 0;
 			const uintptr_t cp = addr::kCallCreateProjectile;
 			const bool aimLine = g_cfg.xh.converge || g_cfg.xh.convergeFirst;
-			if ((aimLine || g_cfg.xh.shotPulse > 0.0f) && g_vatsOk && *(uint8_t*)cp == 0xE8 &&
+			const bool kick = g_cfg.sway.enabled && g_cfg.sway.autoKick;
+			if ((aimLine || g_cfg.xh.shotPulse > 0.0f || kick) && g_vatsOk && *(uint8_t*)cp == 0xE8 &&
 			    cp + 5 + *(int32_t*)(cp + 1) == addr::kCreateProjectile) {
 				DWORD old;
 				VirtualProtect((void*)cp, 5, PAGE_EXECUTE_READWRITE, &old);
 				*(int32_t*)(cp + 1) = (int32_t)((uintptr_t)&Hook_CreateProjectile - (cp + 5));
 				VirtualProtect((void*)cp, 5, old, &old);
 				FlushInstructionCache(GetCurrentProcess(), (void*)cp, 5);
+				g_shotHookOk = true;
 				Log("hooked projectile creation at %08X (shots fly along the crosshair line: third person %d, "
 				    "first person %d; crosshair shot pulse %d)", (unsigned)cp, g_cfg.xh.converge, g_cfg.xh.convergeFirst,
 				    g_cfg.xh.shotPulse > 0.0f);
-			} else if (aimLine || g_cfg.xh.shotPulse > 0.0f) {
-				Log("WARNING: projectile creation or VATS state do not match; third person shots stay vanilla");
+			} else if (aimLine || g_cfg.xh.shotPulse > 0.0f || kick) {
+				Log("WARNING: projectile creation or VATS state do not match; shots stay vanilla, automatic guns "
+				    "keep their fire animation");
 			}
 			{
 				// reload jam roll (see FLOW_JamRoll): push edi; call 0x583720; fstp [esp]; call 0x491770

@@ -48,6 +48,9 @@ First person
 * The gun stays put when you look up and down (no vanilla shift).
 * Moving sideways, the gun glides the other way; going up or down (stairs, ledges, jumps,
   falls), it slides against the movement.
+* Automatic guns: every shot kicks the gun back and it glides forward again just in time for the
+  next one, swaying side to side in rapid fire (instead of the vanilla fire animation). Flame
+  weapons slide back and hold while firing; the minigun keeps its barrel spin.
 * Crouch pose: the gun eases back toward you while crouched.
 
 Safety checks
@@ -110,4 +113,8 @@ Remove the files above. FLOW doesn't touch your saves, so it can be added or rem
 
 CHANGELOG
 ---------
+1.1.0  Automatic weapons: the first person fire animation is replaced by the sway system
+       (a deep kick back per shot, side-to-side sway in rapid fire; flamer slides back and
+       holds; minigun keeps its spin). New [GunSway] settings: bAutomaticKick, fShotKickBack,
+       fShotKickRise, fShotKickSide, fShotKickReturnMs, fShotKickAimMult, fFlameKickBack.
 1.0.0  First release.
