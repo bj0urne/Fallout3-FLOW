@@ -268,6 +268,8 @@ struct CameraConfig {               // times in seconds
 	float zoomSmooth    = 0.15f;    // mouse wheel zoom: each step glides over about this long (0 = vanilla)
 	bool  vanityMouse   = true;     // vanity camera: the mouse turns it like normal aiming
 	bool  keepZoomForced = true;    // forced third person (sitting...): keep the player's zoom
+	bool  steadyReload  = true;     // first person: reload/jam animations don't move the camera
+	bool  steadyFire    = true;     // first person: fire animations don't move the camera
 };
 
 struct CrosshairConfig {
@@ -555,6 +557,9 @@ static void LoadConfig()
 	clampf(c.zoomSmooth, 0.0f, 2.0f);
 	c.vanityMouse   = b("Camera", "bVanityMouseLikeAim", c.vanityMouse);
 	c.keepZoomForced = b("Camera", "bKeepZoomWhenForced", c.keepZoomForced);
+	c.steadyReload  = b("Camera", "bSteadyReloadCamera", c.steadyReload);
+	c.steadyFire    = b("Camera", "bSteadyFireCamera", c.steadyFire);
+	Log("config: Camera: bSteadyReloadCamera=%d bSteadyFireCamera=%d", c.steadyReload, c.steadyFire);
 	Log("config: Camera: bKeepZoomWhenForced=%d", c.keepZoomForced);
 	Log("config: Camera: fViewSwitchMs=%.0f fZoomSmoothMs=%.0f bVanityMouseLikeAim=%d", c.viewSwitch * 1000.0f,
 	    c.zoomSmooth * 1000.0f, c.vanityMouse);
@@ -2050,10 +2055,94 @@ static uintptr_t g_camOrig = addr::kNiAVObjectUpdate;  // what the camera hook c
 
 static void InstallLateCameraHooks();
 
+// First person reload/jam and fire animations (the hunting rifle's, for one) also animate the
+// first person camera node (Camera1st,
+// global 0x107BA78, a child of Bip01 Looking, which carries the look pitch), so the view moves
+// during some reloads and shots. While those play, the node's animated local transform is replaced by its
+// resting one (kept up to date whenever no reload plays), blended in and out over ~0.15 s, and its
+// world transform is recomputed from its parent: the view stays steady, looking around still works.
+static int PlayerReloading();
+
+// A fire animation (Attack*, 26-138, including aiming and up/down variants) playing in the
+// weapon slots (4-6) of the first person animation data (AnimData +0x4C: group per slot, u16).
+static bool PlayerFiring()
+{
+	uint8_t* pc = (uint8_t*)Player();
+	uint8_t* ad = pc ? *(uint8_t**)(pc + 0x5EC) : nullptr;
+	if (!ad) return false;
+	for (int slot = 4; slot <= 6; ++slot) {
+		const uint32_t g = *(uint16_t*)(ad + 0x4C + slot * 2) & 0xFF;
+		if (g >= 26 && g <= 138) return true;
+	}
+	return false;
+}
+
+static struct {
+	bool      have = false;
+	NiTransform rest = {};
+	float     w = 0.0f;
+	int64_t   lastQpc = 0;
+} g_rcam;
+
+static void SteadyReloadCamera(NiAVObject* cam1)
+{
+	const NiAVObject* par = cam1->parent;
+	if (!par) return;
+	const int64_t now = QpcNow();
+	double dt = g_rcam.lastQpc ? (double)(now - g_rcam.lastQpc) / g_qpcFreq : 0.0;
+	if (dt > 0.1) dt = 0.1;
+	g_rcam.lastQpc = now;
+	const bool reloading = !InThirdPerson() && ((g_cfg.cam.steadyReload && PlayerReloading() != 0) ||
+	                                            (g_cfg.cam.steadyFire && PlayerFiring()));
+	if (!reloading && g_rcam.w < 1e-3f) {  // resting: remember the pose
+		g_rcam.rest = cam1->local;
+		g_rcam.have = true;
+	}
+	if (dt > 0.0) g_rcam.w = Approach(g_rcam.w, reloading ? 1.0f : 0.0f, dt, 0.05f);
+	if (!g_rcam.have || g_rcam.w < 1e-3f) return;
+	// blend the animated local transform toward the resting one, then re-orthonormalise
+	const float w = g_rcam.w;
+	const NiTransform& a = cam1->local;
+	const NiTransform& r = g_rcam.rest;
+	NiTransform L;
+	for (int i = 0; i < 3; ++i)
+		for (int j = 0; j < 3; ++j) L.rot.m[i][j] = a.rot.m[i][j] + (r.rot.m[i][j] - a.rot.m[i][j]) * w;
+	L.pos = { a.pos.x + (r.pos.x - a.pos.x) * w, a.pos.y + (r.pos.y - a.pos.y) * w, a.pos.z + (r.pos.z - a.pos.z) * w };
+	L.scale = a.scale + (r.scale - a.scale) * w;
+	{  // Gram-Schmidt on the columns
+		NiPoint3 c0 = { L.rot.m[0][0], L.rot.m[1][0], L.rot.m[2][0] };
+		NiPoint3 c1 = { L.rot.m[0][1], L.rot.m[1][1], L.rot.m[2][1] };
+		auto norm = [](NiPoint3& v) {
+			const float l = std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
+			if (l > 1e-6f) { v.x /= l; v.y /= l; v.z /= l; }
+		};
+		norm(c0);
+		const float d = c0.x * c1.x + c0.y * c1.y + c0.z * c1.z;
+		c1 = { c1.x - c0.x * d, c1.y - c0.y * d, c1.z - c0.z * d };
+		norm(c1);
+		const NiPoint3 c2 = { c0.y * c1.z - c0.z * c1.y, c0.z * c1.x - c0.x * c1.z, c0.x * c1.y - c0.y * c1.x };
+		L.rot.m[0][0] = c0.x; L.rot.m[1][0] = c0.y; L.rot.m[2][0] = c0.z;
+		L.rot.m[0][1] = c1.x; L.rot.m[1][1] = c1.y; L.rot.m[2][1] = c1.z;
+		L.rot.m[0][2] = c2.x; L.rot.m[1][2] = c2.y; L.rot.m[2][2] = c2.z;
+	}
+	// world = parent world * local
+	const NiTransform& P = par->world;
+	cam1->world.rot = MatMul(P.rot, L.rot);
+	const NiPoint3 lp = { L.pos.x * P.scale, L.pos.y * P.scale, L.pos.z * P.scale };
+	cam1->world.pos = { P.pos.x + P.rot.m[0][0] * lp.x + P.rot.m[0][1] * lp.y + P.rot.m[0][2] * lp.z,
+	                    P.pos.y + P.rot.m[1][0] * lp.x + P.rot.m[1][1] * lp.y + P.rot.m[1][2] * lp.z,
+	                    P.pos.z + P.rot.m[2][0] * lp.x + P.rot.m[2][1] * lp.y + P.rot.m[2][2] * lp.z };
+	cam1->world.scale = P.scale * L.scale;
+}
+
 static void __fastcall Hook_UpdateWorldData(NiAVObject* self, void* /*edx*/, void* updateData)
 {
 	g_origUpdateWorldData(self, updateData);
 	if (g_camHookPending) InstallLateCameraHooks();  // the first frame (game thread)
+	if ((g_cfg.cam.steadyReload || g_cfg.cam.steadyFire) && self == *(NiAVObject**)0x0107BA78) {  // Camera1st
+		SteadyReloadCamera(self);
+		return;
+	}
 
 	if (g_cfg.sway.enabled) {
 		NiAVObject* fp = FirstPersonRoot();
