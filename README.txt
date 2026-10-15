@@ -29,6 +29,7 @@ Camera
 * Soft vertical lag in third person: on a jump you rise ahead of the camera and drop ahead of it.
 * Shoulder swap on a key (X by default).
 * The vanity camera (holding the view key) keeps you on the same side of the screen.
+* Sitting down no longer throws the camera far away: your own zoom distance is kept.
 
 Crosshair and aiming
 * A dynamic crosshair that opens up to show your gun's real spread (accuracy, condition, skill,
@@ -42,7 +43,8 @@ Crosshair and aiming
   them. Spread is kept and VATS is untouched.
 
 First person
-* Gun sway: the arms and gun trail a little behind the view and float back, like Half-Life 2.
+* Gun sway: the gun trails a little behind the view, sliding sideways and up/down, and floats
+  back (iSwayStyle=0 brings back the older rotation about your head).
 * A soft weapon bob per step (with footstep sounds) instead of the vanilla walk/run bob.
 * A soft dip on jumps and landings instead of the vanilla shake.
 * The gun stays put when you look up and down (no vanilla shift).
@@ -52,6 +54,7 @@ First person
   next one, swaying side to side in rapid fire (instead of the vanilla fire animation). Flame
   weapons slide back and hold while firing; the minigun keeps its barrel spin.
 * Crouch pose: the gun eases back toward you while crouched.
+* Steady camera: reloads, jams and shots (the hunting rifle, for one) no longer move your view.
 
 Safety checks
 * Every patch location is verified byte for byte first. On an unexpected game version or a
@@ -102,6 +105,8 @@ COMPATIBILITY
   crosshair, set bEnabled=0 under [Crosshair].
 * Mods that change the third person camera may conflict with the [Camera] features; switch them
   off there if needed.
+* Enhanced Camera: works together with FLOW (first person body and sitting from Enhanced Camera,
+  FLOW's camera features on top).
 * Only the player is changed; NPCs are vanilla.
 * Fallout 3 only. Not for New Vegas or Tale of Two Wastelands.
 
@@ -113,6 +118,11 @@ Remove the files above. FLOW doesn't touch your saves, so it can be added or rem
 
 CHANGELOG
 ---------
+1.2.0  Gun sway slides sideways and up/down instead of turning about your head (iSwayStyle).
+       Steady first person camera during reloads, jams and shots (bSteadyReloadCamera,
+       bSteadyFireCamera). Sitting keeps your zoom (bKeepZoomWhenForced). Works together with
+       Enhanced Camera. Fixed doubled footsteps in third person. The first view switch after
+       loading in third person now glides too. Quicker strafe glide, slower look sway catch-up.
 1.1.0  Automatic weapons: the first person fire animation is replaced by the sway system
        (a deep kick back per shot, side-to-side sway in rapid fire; flamer slides back and
        holds; minigun keeps its spin). New [GunSway] settings: bAutomaticKick, fShotKickBack,

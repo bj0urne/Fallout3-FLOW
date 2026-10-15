@@ -23,6 +23,9 @@ Everything is done in the engine at runtime: no custom skeleton, no animation re
 
 ### Other
 - POV: manupulating your POV is now smoother than ever.
+- **Steady camera:** reloads, jams and shots (like the hunting rifle's) no longer move your first person view.
+- **Sitting keeps your zoom:** sitting down no longer throws the third person camera far away.
+- **Enhanced Camera compatible:** both mods' camera features work together.
 
 Every patch site is checked byte for byte before anything is written. On a mismatch, FLOW logs the reason and leaves that feature vanilla.
 
