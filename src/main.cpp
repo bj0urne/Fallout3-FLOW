@@ -321,7 +321,7 @@ struct GunSwayConfig {
 	float kickReturn = 0.25f; // seconds the gun takes to come back after a single shot (rapid fire: sooner)
 	float kickAim = 0.5f;     // share of the kick while aiming down the sights
 	float flameBack = 4.0f;   // flame weapons: units the gun slides back and holds while firing
-	int   style = 0;          // look sway: 0 = the gun turns about the head, 1 = it slides sideways/up/down
+	int   style = 1;          // look sway: 0 = the gun turns about the head, 1 = it slides sideways/up/down
 	float slideUnits = 0.7f;  // style 1: game units of slide per degree of lag
 };
 
