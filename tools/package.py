@@ -108,8 +108,7 @@ def main():
     ]
 
     source_files = []
-    for rel in ["README.md", "README.txt", "LICENSE", "FLOW.ini", "build.ps1", "nexus_description.txt",
-                "nexus_summary.txt", "src/main.cpp", "tools/package.py"]:
+    for rel in ["README.md", "README.txt", "LICENSE", "FLOW.ini", "build.ps1", "src/main.cpp", "tools/package.py"]:
         source_files.append((f"FLOW-{ver}-source/{rel}", open(os.path.join(ROOT, rel), "rb").read()))
 
     os.makedirs(DIST, exist_ok=True)

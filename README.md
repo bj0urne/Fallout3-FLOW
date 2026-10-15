@@ -47,8 +47,6 @@ FLOW.ini               default configuration, every setting documented
 build.ps1              builds FLOW.dll and installs it into ..\Data\FOSE\Plugins
 tools/package.py       builds the release zips into dist/
 README.txt             player readme shipped in the release zip
-nexus_description.txt  Nexus page text (BBCode)
-nexus_summary.txt      Nexus brief overview and short description
 ```
 
 `build.ps1` expects this folder to sit inside the Fallout 3 install folder (`Fallout 3 goty\FLOW\`). It installs into `..\Data`, and it never overwrites an existing `FLOW.ini`.
