@@ -2277,8 +2277,8 @@ static struct PovState {
 	int      dir = 0;               // +1 going to third person, -1 going to first person
 	float    t = 0.0f;              // 0..1 through the glide
 	float    hold = 0.0f;           // third person distance held while gliding in
-	NiPoint3 eyeLocal = {};         // eyes relative to the player (x right, y forward, z up)
-	bool     eyeOk = false;
+	NiPoint3 eyeLocal = { 0.0f, 0.0f, 118.0f };  // eyes relative to the player (x right, y forward, z up)
+	bool     eyeOk = true;          // a standing default until the first person camera node is read
 	bool     released = false;      // glide in done: the game may switch
 } pov;
 
@@ -2343,12 +2343,14 @@ __asm__(
 	"	pushl $0x0077C64D\n"      // where the vanilla vanity code continues
 	"	ret\n");
 
-// Every frame in first person: where the eyes are (the first person camera node), relative to
-// the player, in the player's heading frame.
+// Every frame: where the eyes are (the first person camera node), relative to the player, in the
+// player's heading frame. The game updates the first person skeleton in third person too, so this
+// is known even when a save is loaded in third person (the first switch to first person then glides
+// as well, instead of the game's own zoom).
 static void PovRecordEye()
 {
 	uint8_t* pc = (uint8_t*)Player();
-	if (!pc || pc[0x5A8] || pc[0x5AA]) return;
+	if (!pc) return;
 	NiAVObject* c1 = *(NiAVObject**)0x0107BA78;
 	if (!c1) return;
 	const NiPoint3 P = *(NiPoint3*)(pc + off::kRefrPos);
