@@ -267,6 +267,7 @@ struct CameraConfig {               // times in seconds
 	                                // the third person spot in this long, eased (0 = vanilla)
 	float zoomSmooth    = 0.15f;    // mouse wheel zoom: each step glides over about this long (0 = vanilla)
 	bool  vanityMouse   = true;     // vanity camera: the mouse turns it like normal aiming
+	bool  keepZoomForced = true;    // forced third person (sitting...): keep the player's zoom
 };
 
 struct CrosshairConfig {
@@ -298,7 +299,7 @@ struct CrosshairConfig {
 struct GunSwayConfig {
 	bool  enabled = true;
 	float amount  = 0.3f;    // share of the view's turn the gun trails behind
-	float time    = 0.1f;    // seconds: how quickly the gun catches up
+	float time    = 0.2f;    // seconds: how quickly the gun catches up
 	float maxDeg  = 8.0f;    // the sway approaches this (degrees), ever more slowly
 	bool  smoothJump = true; // no first person jump/land animations; a soft dip instead
 	bool  lockPitch = true;  // the arms follow the view up/down fully (no vanilla pitch shift)
@@ -320,6 +321,8 @@ struct GunSwayConfig {
 	float kickReturn = 0.25f; // seconds the gun takes to come back after a single shot (rapid fire: sooner)
 	float kickAim = 0.5f;     // share of the kick while aiming down the sights
 	float flameBack = 4.0f;   // flame weapons: units the gun slides back and holds while firing
+	int   style = 0;          // look sway: 0 = the gun turns about the head, 1 = it slides sideways/up/down
+	float slideUnits = 0.7f;  // style 1: game units of slide per degree of lag
 };
 
 static struct Config {
@@ -470,6 +473,10 @@ static void LoadConfig()
 	gs.kickReturn = IniFloat(path, "GunSway", "fShotKickReturnMs", gs.kickReturn * 1000.0f) / 1000.0f;
 	gs.kickAim    = IniFloat(path, "GunSway", "fShotKickAimMult", gs.kickAim);
 	gs.flameBack  = IniFloat(path, "GunSway", "fFlameKickBack", gs.flameBack);
+	gs.style      = GetPrivateProfileIntA("GunSway", "iSwayStyle", gs.style, path);
+	gs.slideUnits = IniFloat(path, "GunSway", "fSlideUnitsPerDegree", gs.slideUnits);
+	clampf(gs.slideUnits, 0.0f, 5.0f);
+	Log("config: GunSway: iSwayStyle=%d fSlideUnitsPerDegree=%.2f", gs.style, gs.slideUnits);
 	clampf(gs.flameBack, -20.0f, 20.0f);
 	clampf(gs.kickBack, -20.0f, 20.0f);
 	clampf(gs.kickRise, -10.0f, 10.0f);
@@ -547,6 +554,8 @@ static void LoadConfig()
 	c.zoomSmooth    = IniFloat(path, "Camera", "fZoomSmoothMs", c.zoomSmooth * 1000.0f) / 1000.0f;
 	clampf(c.zoomSmooth, 0.0f, 2.0f);
 	c.vanityMouse   = b("Camera", "bVanityMouseLikeAim", c.vanityMouse);
+	c.keepZoomForced = b("Camera", "bKeepZoomWhenForced", c.keepZoomForced);
+	Log("config: Camera: bKeepZoomWhenForced=%d", c.keepZoomForced);
 	Log("config: Camera: fViewSwitchMs=%.0f fZoomSmoothMs=%.0f bVanityMouseLikeAim=%d", c.viewSwitch * 1000.0f,
 	    c.zoomSmooth * 1000.0f, c.vanityMouse);
 	Log("config: Camera: bEnabled=%d fVerticalLagMs=%.0f bVanityOrbitFix=%d bShoulderSwap=%d iShoulderSwapKey=0x%X "
@@ -1741,15 +1750,19 @@ static void UpdateGunSway()
 			if (stepping) g_sway.stepPhase += (1.4f + 1.3f * run) * (float)dt;  // steps per second
 			else if (g_sway.stepAmp < 0.01f) g_sway.stepPhase = 0.0f;  // the next walk starts with a step
 			// The foot lands at the bottom of each dip (half way through the step): play its footstep,
-			// as the skipped walk/run animation's text keys would have.
-			if (stepping && g_footstepOk && !InThirdPerson() && !((bool(__cdecl*)())addr::kIsMenuMode)()) {
+			// as the skipped walk/run animation's text keys would have. Only when the player really is
+			// in first person: this runs while the first person skeleton updates, and the game clears
+			// the third person flag (+0x5A8) for a moment for that even in third person, so the wanted
+			// view (+0x5AA) is checked too (otherwise third person got these on top of its own
+			// footsteps).
+			if (stepping && g_footstepOk && !pc[0x5A8] && !pc[0x5AA] && !((bool(__cdecl*)())addr::kIsMenuMode)()) {
 				for (float k = 0.5f; k < 4.0f; k += 1.0f) {
 					if (before < k && g_sway.stepPhase >= k) {
 						const int foot = (int)(k - 0.5f) & 1;
 						((void(__cdecl*)(void*, int))addr::kPlayFootstep)(pc, foot);
 						if (g_cfg.debug) {
 							static int n;
-							if (n++ < 6) Log("gun sway: footstep %s (speed %.0f)", foot ? "right" : "left", g_sway.speed);
+							if (n++ < 30) Log("gun sway: footstep %s (speed %.0f)", foot ? "right" : "left", g_sway.speed);
 						}
 					}
 				}
@@ -1865,7 +1878,7 @@ static void UpdateGunSway()
 			const bool stepAir = state != 0 && c.smoothJump && !g_sway.jumped && g_sway.airTime < 0.3f;
 			if (!stepAir) g_sway.moveX += (lateral - g_sway.moveX) * std::fmin(1.0f, (float)dt / 0.1f);
 			const float rel = std::fmax(-1.3f, std::fmin(1.3f, g_sway.moveX / kRunSpeed));
-			g_sway.strafe = SmoothDamp(g_sway.strafe, -c.strafeShift * rel, &g_sway.strafeVel, dt, 0.15f);
+			g_sway.strafe = SmoothDamp(g_sway.strafe, -c.strafeShift * rel, &g_sway.strafeVel, dt, 0.08f);
 		}
 
 		// Fade: first person with the weapon out, not aiming down the sights, not in a menu or VATS.
@@ -1909,13 +1922,22 @@ static void ApplyGunSwayTo(NiAVObject* node)
 	                    g_sway.crouch * g_cfg.sway.crouchLeft) * g_sway.weight;
 	const float dip = (g_sway.dip + step + g_sway.crouch * g_cfg.sway.crouchDip + g_sway.vert) * g_sway.weight;
 	const float kick = g_sway.kick * g_sway.kickW;
-	const float oh = g_sway.oh + g_sway.kickSideCur * g_sway.kickW * g_cfg.sway.kickSide * kDegToRad,  // rapid fire sway
-	            op = g_sway.op + dip * 0.6f * kDegToRad  // dipping tilts the gun down a bit
+	// Look sway: iSwayStyle 0 turns the gun about the head by the lag angles; 1 slides it instead,
+	// keeping its angle: lagging right (after a turn to the left) moves it right, lagging below
+	// (after looking up) moves it down, fSlideUnitsPerDegree per degree. (A Half-Life 2 style
+	// circle with a spring-driven lagging aim and a look-pitch posture were tried and dropped,
+	// 2026-10-13.)
+	const bool slide = g_cfg.sway.style == 1;
+	const float slideSide = slide ? g_sway.oh * kRadToDeg * g_cfg.sway.slideUnits : 0.0f;
+	const float slideDown = slide ? g_sway.op * kRadToDeg * g_cfg.sway.slideUnits : 0.0f;
+	const float oh = (slide ? 0.0f : g_sway.oh) +
+	                 g_sway.kickSideCur * g_sway.kickW * g_cfg.sway.kickSide * kDegToRad,  // rapid fire sway
+	            op = (slide ? 0.0f : g_sway.op) + dip * 0.6f * kDegToRad  // dipping tilts the gun down a bit
 	                                 - kick * g_cfg.sway.kickRise * kDegToRad;  // a shot tips it up
 	const float back = g_sway.crouch * g_cfg.sway.crouchBack * g_sway.weight +  // toward the view
 	                   kick * g_cfg.sway.kickBack + g_sway.flame * g_sway.kickW * g_cfg.sway.flameBack;
 	if (std::fabs(oh) < 1e-5f && std::fabs(op) < 1e-5f && std::fabs(dip) < 1e-3f && std::fabs(side) < 1e-3f &&
-	    std::fabs(back) < 1e-3f)
+	    std::fabs(back) < 1e-3f && std::fabs(slideSide) < 1e-3f && std::fabs(slideDown) < 1e-3f)
 		return;
 	const NiMatrix3& B = g_sway.root->world.rot;
 	const NiPoint3 bodyUp = { B.m[0][2], B.m[1][2], B.m[2][2] }, fwd = { B.m[0][1], B.m[1][1], B.m[2][1] };
@@ -1934,9 +1956,10 @@ static void ApplyGunSwayTo(NiAVObject* node)
 	                    c.z + R.m[2][0] * d.x + R.m[2][1] * d.y + R.m[2][2] * d.z };
 	node->world.rot = MatMul(R, node->world.rot);
 	const NiPoint3 look = { fwd.x * cp - bodyUp.x * sp, fwd.y * cp - bodyUp.y * sp, fwd.z * cp - bodyUp.z * sp };
-	node->world.pos = { node->world.pos.x - up.x * dip + right.x * side - look.x * back,
-	                    node->world.pos.y - up.y * dip + right.y * side - look.y * back,
-	                    node->world.pos.z - up.z * dip + right.z * side - look.z * back };
+	const float down = dip + slideDown, across = side + slideSide;
+	node->world.pos = { node->world.pos.x - up.x * down + right.x * across - look.x * back,
+	                    node->world.pos.y - up.y * down + right.y * across - look.y * back,
+	                    node->world.pos.z - up.z * down + right.z * across - look.z * back };
 }
 
 // AnimData::PlayAnimGroup (0x461690), hooked with a jump to Hook_PlayAnimGroup, on the first
@@ -2016,9 +2039,21 @@ static void* __fastcall Hook_PlayAnimGroup(uint8_t* animData, void* /*edx*/, uin
 
 static bool PatchVtableSlot(uintptr_t vtbl, uintptr_t slot, uintptr_t expect, void* fn);
 
+// Enhanced Camera (and possibly other plugins) patch the same camera update call (0x77E538) and the
+// forced third person zoom stores, and FOSE loads FLOW first (alphabetically): a later plugin then
+// overwrote FLOW's camera hook (no vertical lag, shoulder swap, view glide; the smoothed zoom stuck
+// at its first value, fully zoomed in). So these go in on the first frame instead, after every
+// plugin: the camera hook chains to whatever is at the call by then (the game's NiAVObject::Update
+// or another mod's hook), and code another mod has already changed is left to that mod.
+static bool      g_camHookPending;
+static uintptr_t g_camOrig = addr::kNiAVObjectUpdate;  // what the camera hook calls after FLOW's work
+
+static void InstallLateCameraHooks();
+
 static void __fastcall Hook_UpdateWorldData(NiAVObject* self, void* /*edx*/, void* updateData)
 {
 	g_origUpdateWorldData(self, updateData);
+	if (g_camHookPending) InstallLateCameraHooks();  // the first frame (game thread)
 
 	if (g_cfg.sway.enabled) {
 		NiAVObject* fp = FirstPersonRoot();
@@ -2424,7 +2459,8 @@ static bool __fastcall Hook_PovKeyRelease(void* pc, void* /*edx*/, bool firstPer
 	return ((SetFirstPerson_t)0x00775430)(pc, firstPerson);
 }
 
-static void __fastcall Hook_CameraUpdate(NiAVObject* node, void* /*edx*/, void* updateData)
+// FLOW's camera work, just before the camera node's NiAVObject::Update (0x77E538).
+extern "C" void __cdecl FLOW_CameraPre(NiAVObject* node)
 {
 	LARGE_INTEGER li;
 	QueryPerformanceCounter(&li);
@@ -2432,14 +2468,122 @@ static void __fastcall Hook_CameraUpdate(NiAVObject* node, void* /*edx*/, void* 
 	cam.lastQpc = li.QuadPart;
 	if (dt > 0.25) { dt = 0.25; cam.init = false; }  // after a pause/load: start fresh
 
+	// Forced third person (player +0x5AB: sitting, getting up, scripted scenes): the camera is left
+	// to the game, or to Enhanced Camera, which turns it into its first person sitting view and
+	// builds that on the camera as the game left it. Only the smoothed zoom keeps following.
+	uint8_t* pcF = (uint8_t*)Player();
+	if (pcF && pcF[0x5AB]) {
+		cam.init = false;
+		UpdateZoomSmooth();
+		return;
+	}
+
 	if (g_cfg.cam.shoulderSwap) UpdateShoulder(dt);
 	// Death/knockdown camera stays vanilla (it follows the ragdoll).
 	if (node && InThirdPerson() && !PlayerRagdollReason()) SmoothCamera(node, dt);
 	else cam.init = false;
 	UpdateZoomSmooth();  // the wheel was read earlier this frame; the camera uses it next frame
 	if (node && g_cfg.cam.viewSwitch > 0.0f) PovTransition(node, dt);
-	((NiAVObjectUpdate_t)addr::kNiAVObjectUpdate)(node, updateData);
 }
+
+static void __fastcall Hook_CameraUpdate(NiAVObject* node, void* /*edx*/, void* updateData)
+{
+	FLOW_CameraPre(node);
+	((NiAVObjectUpdate_t)g_camOrig)(node, updateData);  // the game's update, or another mod's call hook
+}
+
+// When another mod (Enhanced Camera) has replaced the call at 0x77E538 with a jump to its own code
+// (which returns to 0x77E53D), FLOW's jump goes there instead: FLOW's camera work with every
+// register and the stack as they were (node in ecx, the update data on the stack, as for the call),
+// then on into that mod's code.
+extern "C" uintptr_t FLOW_camJmpTarget = 0;
+extern "C" void FLOW_CamJmpStub();
+__asm__(
+	".text\n"
+	".globl _FLOW_CamJmpStub\n"
+	"_FLOW_CamJmpStub:\n"
+	"	pushfl\n"
+	"	pushal\n"
+	"	pushl %ecx\n"
+	"	call _FLOW_CameraPre\n"
+	"	addl $4, %esp\n"
+	"	popal\n"
+	"	popfl\n"
+	"	jmp *_FLOW_camJmpTarget\n");
+
+static void InstallLateCameraHooks()
+{
+	if (!g_camHookPending) return;
+	g_camHookPending = false;
+	const uintptr_t at = addr::kCallCameraUpdate;
+	const uint8_t op = *(uint8_t*)at;
+	if (op != 0xE8 && op != 0xE9) {
+		Log("WARNING: camera update call at %08X was replaced by another mod (%02X); camera features disabled",
+		    (unsigned)at, op);
+		return;
+	}
+	const uintptr_t target = at + 5 + *(int32_t*)(at + 1);
+	if (target == (uintptr_t)&Hook_CameraUpdate || target == (uintptr_t)&FLOW_CamJmpStub) return;
+	DWORD old;
+	VirtualProtect((void*)at, 5, PAGE_EXECUTE_READWRITE, &old);
+	if (op == 0xE8) {  // a call: the game's NiAVObject::Update, or another mod's call hook
+		g_camOrig = target;
+		*(int32_t*)(at + 1) = (int32_t)((uintptr_t)&Hook_CameraUpdate - (at + 5));
+	} else {           // another mod's jump (Enhanced Camera): FLOW's work first, then that jump
+		FLOW_camJmpTarget = target;
+		*(int32_t*)(at + 1) = (int32_t)((uintptr_t)&FLOW_CamJmpStub - (at + 5));
+	}
+	VirtualProtect((void*)at, 5, old, &old);
+	FlushInstructionCache(GetCurrentProcess(), (void*)at, 5);
+	if (target == addr::kNiAVObjectUpdate)
+		Log("hooked third person camera update at %08X", (unsigned)at);
+	else
+		Log("hooked third person camera update at %08X, chained to another mod's %s at %08X (Enhanced Camera?)",
+		    (unsigned)at, op == 0xE8 ? "call" : "jump", (unsigned)target);
+	if (g_cfg.cam.keepZoomForced) {
+		// Forced third person (sitting down, some scripted scenes: 0x775570 and two more copies at
+		// 0x77A3B0 / 0x77A5B0) sets the zoom (0x107BDBC) to at least fVanityModeForceDefault (300),
+		// far away, and nothing puts it back. The store is replaced by a pop (fstp st(0)), so the
+		// player's own zoom is kept. Sites another mod has changed (Enhanced Camera has its own
+		// version of this) are left to it.
+		const uint8_t pat[] = { 0xD9, 0x05, 0xBC, 0xBD, 0x07, 0x01, 0xD9, 0x05, 0xBC, 0xE9, 0xF5, 0x00, 0xD8, 0xD1,
+		                        0xDF, 0xE0, 0xDD, 0xD9, 0xF6, 0xC4, 0x41, 0x75, 0x08, 0xD9, 0x1D, 0xBC, 0xBD,
+		                        0x07, 0x01, 0xEB, 0x02, 0xDD, 0xD8 };
+		const uintptr_t sites[3] = { 0x00775596, 0x0077A40F, 0x0077A605 };  // the fld [zoom] of each
+		int done = 0;
+		for (uintptr_t a : sites) {
+			if (memcmp((const void*)a, pat, sizeof(pat)) != 0) continue;
+			const uintptr_t st = a + 23;  // fstp dword ptr [0x107BDBC]
+			const uint8_t pop[6] = { 0xDD, 0xD8, 0x90, 0x90, 0x90, 0x90 };
+			VirtualProtect((void*)st, 6, PAGE_EXECUTE_READWRITE, &old);
+			memcpy((void*)st, pop, 6);
+			VirtualProtect((void*)st, 6, old, &old);
+			FlushInstructionCache(GetCurrentProcess(), (void*)st, 6);
+			++done;
+		}
+		if (done == 3) Log("forced third person keeps the player's zoom (3 sites)");
+		else if (done == 0) Log("forced third person zoom: changed by another mod (Enhanced Camera?), left to it");
+		else Log("WARNING: forced third person zoom: %d of 3 sites matched", done);
+	}
+	if (g_cfg.cam.zoomSmooth > 0.0f) {
+		// fdivr dword ptr [0x107BDBC] / fld dword ptr [0x107BDBC] in the third person camera
+		const uint8_t a[] = { 0xD8, 0x3D, 0xBC, 0xBD, 0x07, 0x01 }, b[] = { 0xD9, 0x05, 0xBC, 0xBD, 0x07, 0x01 };
+		if (memcmp((const void*)0x0077DD9B, a, 6) == 0 && memcmp((const void*)0x0077DE15, b, 6) == 0) {
+			g_zoomSmooth = *(float*)0x0107BDBC;
+			for (uintptr_t at2 : { (uintptr_t)0x0077DD9B, (uintptr_t)0x0077DE15 }) {
+				VirtualProtect((void*)at2, 6, PAGE_EXECUTE_READWRITE, &old);
+				*(float**)(at2 + 2) = &g_zoomSmooth;
+				VirtualProtect((void*)at2, 6, old, &old);
+				FlushInstructionCache(GetCurrentProcess(), (void*)at2, 6);
+			}
+			g_zoomHooked = true;
+			Log("smooth wheel zoom: camera zoom reads at 0077DD9B/0077DE15 redirected");
+		} else {
+			Log("WARNING: camera zoom reads do not match; wheel zoom stays vanilla");
+		}
+	}
+}
+
 
 // ---------------------------------------------------------------------------------------------
 // Crosshair: four lines whose gap shows the gun's real spread cone (weapon spread and min spread,
@@ -3785,12 +3929,10 @@ __declspec(dllexport) bool FOSEPlugin_Load(const FOSEInterface* fose)
 		// call rel32 -> NiAVObject::Update for the third person camera node
 		const uintptr_t at = addr::kCallCameraUpdate;
 		if (*(uint8_t*)at == 0xE8 && at + 5 + *(int32_t*)(at + 1) == addr::kNiAVObjectUpdate) {
-			DWORD old;
-			VirtualProtect((void*)at, 5, PAGE_EXECUTE_READWRITE, &old);
-			*(int32_t*)(at + 1) = (int32_t)((uintptr_t)&Hook_CameraUpdate - (at + 5));
-			VirtualProtect((void*)at, 5, old, &old);
-			FlushInstructionCache(GetCurrentProcess(), (void*)at, 5);
-			Log("hooked third person camera update at %08X", (unsigned)at);
+			// The hook itself (and what depends on it) goes in on the first frame, after every plugin
+			// has loaded: see InstallLateCameraHooks.
+			g_camHookPending = true;
+			Log("third person camera update at %08X: hooked on the first frame (after the other plugins)", (unsigned)at);
 			if (g_cfg.cam.vanityMouse) {
 				// cmp byte ptr [0x1075B28], al; fild dword ptr [esp+0x18]; ...; fld [fVanityModeXMult]
 				const uint8_t v[] = { 0x38, 0x05, 0x28, 0x5B, 0x07, 0x01, 0xDB, 0x44, 0x24, 0x18 };
@@ -3809,24 +3951,6 @@ __declspec(dllexport) bool FOSEPlugin_Load(const FOSEInterface* fose)
 					Log("vanity camera mouse: like normal aiming (hooked 0077C45E)");
 				} else {
 					Log("WARNING: vanity camera mouse code does not match; it stays vanilla");
-				}
-			}
-			if (g_cfg.cam.zoomSmooth > 0.0f) {
-				// fdivr dword ptr [0x107BDBC] / fld dword ptr [0x107BDBC] in the third person camera
-				const uint8_t a[] = { 0xD8, 0x3D, 0xBC, 0xBD, 0x07, 0x01 }, b[] = { 0xD9, 0x05, 0xBC, 0xBD, 0x07, 0x01 };
-				if (memcmp((const void*)0x0077DD9B, a, 6) == 0 && memcmp((const void*)0x0077DE15, b, 6) == 0) {
-					g_zoomSmooth = *(float*)0x0107BDBC;
-					for (uintptr_t at2 : { (uintptr_t)0x0077DD9B, (uintptr_t)0x0077DE15 }) {
-						DWORD old;
-						VirtualProtect((void*)at2, 6, PAGE_EXECUTE_READWRITE, &old);
-						*(float**)(at2 + 2) = &g_zoomSmooth;
-						VirtualProtect((void*)at2, 6, old, &old);
-						FlushInstructionCache(GetCurrentProcess(), (void*)at2, 6);
-					}
-					g_zoomHooked = true;
-					Log("smooth wheel zoom: camera zoom reads at 0077DD9B/0077DE15 redirected");
-				} else {
-					Log("WARNING: camera zoom reads do not match; wheel zoom stays vanilla");
 				}
 			}
 			if (g_cfg.cam.viewSwitch > 0.0f) {
