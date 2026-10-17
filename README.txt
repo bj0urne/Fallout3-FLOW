@@ -118,6 +118,9 @@ Remove the files above. FLOW doesn't touch your saves, so it can be added or rem
 
 CHANGELOG
 ---------
+1.2.1  First person: the body always faces the camera (with Enhanced Camera you could see
+       your own neck). No more diagonal drift after letting go of the movement keys while
+       turning.
 1.2.0  Gun sway slides sideways and up/down instead of turning about your head (iSwayStyle).
        Steady first person camera during reloads, jams and shots (bSteadyReloadCamera,
        bSteadyFireCamera). Sitting keeps your zoom (bKeepZoomWhenForced). Works together with
