@@ -686,6 +686,16 @@ static bool InThirdPerson()
 	return pc && *(bool*)(pc + off::kThirdPerson);
 }
 
+// The view the player chose (+0x5AA, third person wanted). The current-view flag (+0x5A8) is
+// switched for a moment while the game (or Enhanced Camera, which shows the body in first person)
+// updates the other view's skeleton, so the body logic reads the chosen view: in first person the
+// body always faces the camera, as in vanilla.
+static bool BodyThirdPerson()
+{
+	uint8_t* pc = (uint8_t*)Player();
+	return pc && pc[0x5AA] != 0;
+}
+
 // Look pitch in radians (TESObjectREFR rotX); sign confirmed in game, see UpdateHead.
 static float PlayerPitch()
 {
@@ -766,6 +776,7 @@ static struct State {
 	NiAVObject* neck    = nullptr;  // Bip01 Neck1 and Bip01 Head: look toward the camera
 	NiAVObject* head    = nullptr;
 	bool        ragdoll = false;    // dead/knocked down: hands off the skeleton (PlayerRagdollReason)
+	bool        firstPerson = false; // the chosen view is first person: no body turning
 	bool        freeLook = false;   // weapon holstered, standing still: body stays put
 	bool        torsoLag = false;   // weapon holstered, moving: whole body trails behind turns
 	bool        holsteredMoving = false;  // weapon holstered, moving (free look's only blocker)
@@ -1019,7 +1030,7 @@ static const char* FreeLookBlocker(uint32_t flags)
 	if (!g_cfg.look.enabled) return "disabled";
 	if (!g_stateChecksOk) return "game check failed";
 	if (!g.body) return "no skeleton";
-	if (!InThirdPerson()) return "first person";
+	if (!BodyThirdPerson()) return "first person";
 	if (*(bool*)addr::kVanityCamera) return "vanity camera";
 	if (PlayerWeaponOut()) return "weapon out";
 	if (PlayerSitSleepState()) return "sitting/sleeping";
@@ -1177,6 +1188,26 @@ static void UpdateAngle()
 			return;
 		}
 	}
+
+	// First person (the chosen view): no body turning at all, the body faces the camera as in
+	// vanilla (with Enhanced Camera the body is visible; free look and turn in place let you see
+	// your own neck).
+	if (!BodyThirdPerson()) {
+		if (g_cfg.debug && !g.firstPerson) Log("first person: body turning off");
+		g.firstPerson = true;
+		g.diagonal = g.diagonalVel = g.twist = g.angle = 0.0f;
+		g.bodyYaw = g.bodyDiag = g.bodyDiagVel = 0.0f;
+		g.headYaw = g.headPitch = g.lean = g.turnRate = 0.0f;
+		g.catchingUp = false;
+		g.catchVel = 0.0f;
+		g.stillTime = 0.0;
+		g.freeLook = g.torsoLag = g.holsteredMoving = false;
+		g.freeLookBlocker = "first person";
+		g.haveHeading = false;
+		return;
+	}
+	if (g_cfg.debug && g.firstPerson) Log("third person: body turning on");
+	g.firstPerson = false;
 
 	uint32_t flags = PlayerMoveFlags();
 	if (g.strafeKeys && (flags & kMove_Direction) == kMove_Forward)
@@ -1384,9 +1415,11 @@ static SetMovementFlags_t g_origSetMovementFlags;
 static bool g_strafeMoveHooked;  // Hook_AnimMoveVector installed (strafe-as-run needs it)
 
 // Acceleration: the movement vector handed to Actor::Move (player's local frame, x right,
-// y forward). Turned into a velocity with the game's frame delta and eased toward the
-// target with a critically damped spring, so starting, stopping and walk/run changes take about
-// fAccelerationMs / fDecelerationMs instead of being instant. Works in first and third person.
+// y forward). Turned into a world space velocity with the game's frame delta and the heading and
+// eased toward the target with a critically damped spring, so starting, stopping and walk/run
+// changes take about fAccelerationMs / fDecelerationMs instead of being instant. Works in first and
+// third person. (Smoothed in the player's own frame, the leftover speed turned with the player:
+// turning while letting go of the keys slid you sideways for a moment.)
 static struct MoveSmooth {
 	NiPoint3 vel = {}, rate = {};
 } mv;
@@ -1399,15 +1432,21 @@ static void SmoothMovement(NiPoint3& d)
 		mv = MoveSmooth();
 		return;
 	}
-	const float tx = d.x / dt, ty = d.y / dt;
+	const float h = PlayerHeading();
+	if (!std::isfinite(h)) return;
+	const float ch = std::cos(h), sh = std::sin(h);
+	// local (x right, y forward) <-> world, as for the eye position
+	const float lx = d.x / dt, ly = d.y / dt;
+	const float tx = lx * ch + ly * sh, ty = -lx * sh + ly * ch;
 	const float target = std::sqrt(tx * tx + ty * ty);
 	const float current = std::sqrt(mv.vel.x * mv.vel.x + mv.vel.y * mv.vel.y);
 	const float time = target < current ? mc.decelTime : mc.accelTime;
 	mv.vel.x = SmoothDamp(mv.vel.x, tx, &mv.rate.x, dt, time);
 	mv.vel.y = SmoothDamp(mv.vel.y, ty, &mv.rate.y, dt, time);
 	if (target == 0.0f && mv.vel.x * mv.vel.x + mv.vel.y * mv.vel.y < 1.0f) mv = MoveSmooth();
-	d.x = mv.vel.x * dt;
-	d.y = mv.vel.y * dt;  // z (root motion height) is left as is
+	// back to the local frame
+	d.x = (mv.vel.x * ch - mv.vel.y * sh) * dt;
+	d.y = (mv.vel.x * sh + mv.vel.y * ch) * dt;  // z (root motion height) is left as is
 }
 
 // The forward run's root motion points forward; while a strafe is played as a forward run, turn
@@ -1432,8 +1471,27 @@ static bool __fastcall Hook_AnimMoveVector(void* animData, void* /*edx*/, NiPoin
 typedef uint32_t(__thiscall* ActorMove_t)(void*, float, NiPoint3*, uint32_t);
 static uint32_t __fastcall Hook_PlayerMove(void* actor, void* /*edx*/, float f, NiPoint3* move, uint32_t flags)
 {
-	if (g_cfg.move.accel && move && __builtin_return_address(0) == (void*)addr::kPlayerMoverMoveRet)
-		SmoothMovement(*move);
+	if (move && __builtin_return_address(0) == (void*)addr::kPlayerMoverMoveRet) {
+		// No movement keys on the ground: PlayerMover's own movement is dropped (turn in place's
+		// turn animation and the end of a movement animation have root motion that carried the
+		// player off diagonally for about a metre after letting go of the keys while turning).
+		// What is left is the smooth stop of the speed already going (acceleration). Jumps and
+		// falls keep their momentum.
+		if (!(PlayerMoveFlags() & kMove_Direction) && !g.ragdoll) {
+			void* proc = PlayerProcess();
+			uint8_t* cc = proc ? VCall<uint8_t*>(proc, vslot::kProcessCharController) : nullptr;
+			if (cc && *(uint32_t*)(cc + 0x270) == 0 && (move->x != 0.0f || move->y != 0.0f)) {
+				if (g_cfg.debug) {
+					static int n;
+					static float sum;
+					sum += std::sqrt(move->x * move->x + move->y * move->y);
+					if (n++ % 30 == 0) Log("move: dropped %.1f units of movement with no movement keys (so far)", sum);
+				}
+				move->x = move->y = 0.0f;
+			}
+		}
+		if (g_cfg.move.accel) SmoothMovement(*move);
+	}
 	return ((ActorMove_t)addr::kActorMove)(actor, f, move, flags);
 }
 
@@ -1455,7 +1513,7 @@ static void __fastcall Hook_SetMovementFlags(void* mover, void* /*edx*/, uint32_
 	const uint32_t dirIn = flags & kMove_Direction;
 	const bool wasAnalog = g.analog;
 	g.analog = false;
-	if (g_cfg.analog360 && g.legs && dirIn && !(flags & kMove_Keyboard) && InThirdPerson()) {
+	if (g_cfg.analog360 && g.legs && dirIn && !(flags & kMove_Keyboard) && BodyThirdPerson()) {
 		const float x = *(float*)((uint8_t*)mover + off::kMoverInputX);
 		const float y = *(float*)((uint8_t*)mover + off::kMoverInputY);
 		if (x * x + y * y > 0.0025f) {
@@ -1488,14 +1546,14 @@ static void __fastcall Hook_SetMovementFlags(void* mover, void* /*edx*/, uint32_
 	const bool pureStrafe = (dir == kMove_Left || dir == kMove_Right);
 	g.strafeKeys = 0;
 	if (!g.analog && g_cfg.strafeAsRun && g_strafeMoveHooked && pureStrafe && g.legs && g_stateChecksOk &&
-	    InThirdPerson() && PlayerWeaponOut()) {
+	    BodyThirdPerson() && PlayerWeaponOut()) {
 		g.strafeKeys = dir;
 		flags = (flags & ~kMove_Direction) | kMove_Forward;
 	}
 
 	const TurnConfig& tc = g_cfg.turn;
 	const bool turnAnim = tc.enabled && tc.turnAnim && g.legs;
-	if ((turnAnim || g.freeLook) && !(flags & kMove_Direction) && InThirdPerson()) {
+	if ((turnAnim || g.freeLook) && !(flags & kMove_Direction) && BodyThirdPerson()) {
 		// Free look: the body does not turn at all, so no turn animation either.
 		const uint32_t in = flags & kMove_Turn;
 		flags &= ~kMove_Turn;
@@ -1868,7 +1926,8 @@ static void UpdateGunSway()
 		if (c.strafeShift > 0.0f) {
 			float lateral;  // units per second, + = moving to the right
 			if (g_cfg.move.accel) {
-				lateral = mv.vel.x;
+				// the smoothed velocity is in world space: its part along the player's right
+				lateral = mv.vel.x * std::cos(h) - mv.vel.y * std::sin(h);
 			} else {
 				const NiPoint3 pos = *(NiPoint3*)(pc + off::kRefrPos);
 				static NiPoint3 last = pos;
