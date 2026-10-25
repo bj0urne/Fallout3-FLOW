@@ -118,6 +118,8 @@ Remove the files above. FLOW doesn't touch your saves, so it can be added or rem
 
 CHANGELOG
 ---------
+1.2.3  Third person: shots land on the crosshair (they landed a few degrees to the left, where
+       the gun model happened to point).
 1.2.2  Sitting: no more character shift when sitting down, the head follows the camera in
        third person, and the seat no longer pushes the camera in (bSeatDoesNotBlockCamera).
        Aiming down the sights: the look sway shows (fSwayAimMult), automatic guns kick

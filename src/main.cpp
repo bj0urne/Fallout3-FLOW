@@ -37,7 +37,7 @@
 
 #define PLUGIN_NAME        "FLOW"
 #define PLUGIN_VERSION     1
-#define PLUGIN_VERSION_STR "1.2.2"
+#define PLUGIN_VERSION_STR "1.2.3"
 
 // ---------------------------------------------------------------------------------------------
 // FOSE plugin interface (subset of fose/PluginAPI.h)
@@ -3800,10 +3800,10 @@ static bool AimShotAlongCrosshair(NiPoint3* start, float* heading, float* pitch)
 	if (nh < 0.0f) nh += 2.0f * kPi;
 	const float np = -std::asin(std::fmax(-1.0f, std::fmin(1.0f, fwd.z))) + dp;
 	if (g_cfg.debug)
-		Log("aim line: shot moved %.0f units (from the muzzle to the crosshair line), turned %+.2f deg right, "
-		    "%+.2f deg down", std::sqrt((from.x - start->x) * (from.x - start->x) +
+		Log("aim line: %s person shot moved %.0f units (from the muzzle to the crosshair line), turned %+.2f deg "
+		    "right, %+.2f deg down; spread kept %+.2f / %+.2f deg", InThirdPerson() ? "third" : "first", std::sqrt((from.x - start->x) * (from.x - start->x) +
 		    (from.y - start->y) * (from.y - start->y) + (from.z - start->z) * (from.z - start->z)),
-		    WrapPi(nh - *heading) * kRadToDeg, (np - *pitch) * kRadToDeg);
+		    WrapPi(nh - *heading) * kRadToDeg, (np - *pitch) * kRadToDeg, dh * kRadToDeg, dp * kRadToDeg);
 	*start = from;
 	*heading = nh;
 	*pitch = np;
@@ -3828,6 +3828,38 @@ static void HideTracer(uint8_t* proj, uint8_t* form)
 	if (root->children[0]) root->children[0]->flags &= ~1u;  // bullet shown
 	if (root->children[1]) root->children[1]->flags |= 1u;   // tracer culled
 }
+
+// Third person, the fire function aims the player's shots along the gun model's projectile node
+// (0x4BE40B: `cmp byte [player+0x5A9], 0`, set in third person; else the player's own angles, as
+// in first person). The 3D gun points wherever the animation holds it, a few degrees off the view
+// (5 deg left with a rifle), and the shot hook kept that as if it were spread: shots landed beside
+// the crosshair. With bThirdPersonAimAtCrosshair the check is replaced by a call to this stub, which
+// says "first person" (ZF set) whenever the shot hook will move the shot onto the crosshair line, so
+// only the random spread is left. VATS and the vanity camera keep the game's aim.
+extern "C" bool __cdecl FLOW_AimFromView()
+{
+	return g_cfg.xh.converge && g_vatsOk && *(int*)addr::kVATSMode == 0 && !*(bool*)addr::kVanityCamera &&
+	       !PlayerRagdollReason();
+}
+extern "C" void FLOW_AimCheck();
+__asm__(
+	".text\n"
+	".globl _FLOW_AimCheck\n"
+	"_FLOW_AimCheck:\n"
+	"	pushl %eax\n"
+	"	pushl %ecx\n"
+	"	pushl %edx\n"
+	"	call _FLOW_AimFromView\n"
+	"	popl %edx\n"
+	"	popl %ecx\n"
+	"	testb %al, %al\n"
+	"	popl %eax\n"
+	"	jne 1f\n"
+	"	cmpb $0, 0x5A9(%ecx)\n"
+	"	ret\n"
+	"1:\n"
+	"	cmpl %ecx, %ecx\n"
+	"	ret\n");
 
 typedef void*(__cdecl* CreateProjectile_t)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t,
                                            uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t,
@@ -4174,6 +4206,21 @@ __declspec(dllexport) bool FOSEPlugin_Load(const FOSEInterface* fose)
 				VirtualProtect((void*)cp, 5, old, &old);
 				FlushInstructionCache(GetCurrentProcess(), (void*)cp, 5);
 				g_shotHookOk = true;
+				// third person aim from the view (FLOW_AimCheck): cmp byte [ecx+0x5A9], 0
+				const uint8_t aim3[] = { 0x80, 0xB9, 0xA9, 0x05, 0x00, 0x00, 0x00 };
+				const uintptr_t ac = 0x004BE40B;
+				if (g_cfg.xh.converge && memcmp((const void*)ac, aim3, sizeof(aim3)) == 0) {
+					VirtualProtect((void*)ac, 7, PAGE_EXECUTE_READWRITE, &old);
+					*(uint8_t*)ac = 0xE8;
+					*(int32_t*)(ac + 1) = (int32_t)((uintptr_t)&FLOW_AimCheck - (ac + 5));
+					*(uint8_t*)(ac + 5) = 0x66;  // 2-byte nop
+					*(uint8_t*)(ac + 6) = 0x90;
+					VirtualProtect((void*)ac, 7, old, &old);
+					FlushInstructionCache(GetCurrentProcess(), (void*)ac, 7);
+					Log("third person shots aimed from the view, not the gun model (%08X)", (unsigned)ac);
+				} else if (g_cfg.xh.converge) {
+					Log("WARNING: third person shot aim code does not match; shots keep the gun model's aim");
+				}
 				Log("hooked projectile creation at %08X (shots fly along the crosshair line: third person %d, "
 				    "first person %d; crosshair shot pulse %d)", (unsigned)cp, g_cfg.xh.converge, g_cfg.xh.convergeFirst,
 				    g_cfg.xh.shotPulse > 0.0f);
