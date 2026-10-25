@@ -37,7 +37,7 @@
 
 #define PLUGIN_NAME        "FLOW"
 #define PLUGIN_VERSION     1
-#define PLUGIN_VERSION_STR "1.2.1"
+#define PLUGIN_VERSION_STR "1.2.2"
 
 // ---------------------------------------------------------------------------------------------
 // FOSE plugin interface (subset of fose/PluginAPI.h)

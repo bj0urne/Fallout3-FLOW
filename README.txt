@@ -118,6 +118,11 @@ Remove the files above. FLOW doesn't touch your saves, so it can be added or rem
 
 CHANGELOG
 ---------
+1.2.2  Sitting: no more character shift when sitting down, the head follows the camera in
+       third person, and the seat no longer pushes the camera in (bSeatDoesNotBlockCamera).
+       Aiming down the sights: the look sway shows (fSwayAimMult), automatic guns kick
+       straight back without side sway (fShotKickSideAimMult), and the crosshair can be hidden
+       in first person (bHideWhenAiming, off by default).
 1.2.1  First person: the body always faces the camera (with Enhanced Camera you could see
        your own neck). No more diagonal drift after letting go of the movement keys while
        turning.
