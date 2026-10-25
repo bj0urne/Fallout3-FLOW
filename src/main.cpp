@@ -292,6 +292,7 @@ struct CrosshairConfig {
 	float opacity       = 0.9f;
 	bool  outline       = true;
 	bool  hideScoped    = true;
+	bool  hideAiming    = true;     // first person: hidden while aiming down the sights (the sights are the crosshair)
 	bool  noGunClosed   = true;     // no gun drawn: ours replaces the vanilla one, closed, no dot
 	bool  reloadClosed  = true;     // reloading (or clearing a jam): closed too
 	float openTime      = 0.25f;    // seconds: drawing/holstering opens/closes it, the dot fades
@@ -323,6 +324,8 @@ struct GunSwayConfig {
 	float kickSide = 1.5f;    // rapid fire sways the gun side to side this many degrees
 	float kickReturn = 0.25f; // seconds the gun takes to come back after a single shot (rapid fire: sooner)
 	float kickAim = 0.5f;     // share of the kick while aiming down the sights
+	float kickSideAim = 0.0f; // share of the side-to-side sway while aiming (0: the sights stay on target)
+	float swayAim = 0.5f;     // share of the look sway while aiming down the sights
 	float flameBack = 4.0f;   // flame weapons: units the gun slides back and holds while firing
 	int   style = 1;          // look sway: 0 = the gun turns about the head, 1 = it slides sideways/up/down
 	float slideUnits = 0.7f;  // style 1: game units of slide per degree of lag
@@ -475,6 +478,10 @@ static void LoadConfig()
 	clampf(gs.kickSide, 0.0f, 10.0f);
 	gs.kickReturn = IniFloat(path, "GunSway", "fShotKickReturnMs", gs.kickReturn * 1000.0f) / 1000.0f;
 	gs.kickAim    = IniFloat(path, "GunSway", "fShotKickAimMult", gs.kickAim);
+	gs.kickSideAim = IniFloat(path, "GunSway", "fShotKickSideAimMult", gs.kickSideAim);
+	gs.swayAim    = IniFloat(path, "GunSway", "fSwayAimMult", gs.swayAim);
+	clampf(gs.swayAim, 0.0f, 2.0f);
+	clampf(gs.kickSideAim, 0.0f, 2.0f);
 	gs.flameBack  = IniFloat(path, "GunSway", "fFlameKickBack", gs.flameBack);
 	gs.style      = GetPrivateProfileIntA("GunSway", "iSwayStyle", gs.style, path);
 	gs.slideUnits = IniFloat(path, "GunSway", "fSlideUnitsPerDegree", gs.slideUnits);
@@ -515,6 +522,8 @@ static void LoadConfig()
 	x.opacity    = IniFloat(path, "Crosshair", "fOpacity", x.opacity);
 	x.outline    = b("Crosshair", "bOutline", x.outline);
 	x.hideScoped = b("Crosshair", "bHideWhenScoped", x.hideScoped);
+	x.hideAiming = b("Crosshair", "bHideWhenAiming", x.hideAiming);
+	Log("config: Crosshair: bHideWhenAiming=%d", x.hideAiming);
 	x.noGunClosed = b("Crosshair", "bShowClosedWithoutGun", x.noGunClosed);
 	x.reloadClosed = b("Crosshair", "bCloseWhileReloading", x.reloadClosed);
 	x.openTime   = IniFloat(path, "Crosshair", "fOpenMs", x.openTime * 1000.0f) / 1000.0f;
@@ -1704,6 +1713,8 @@ static struct SwayState {
 	int64_t kickQpc = 0;                     // when the last shot was fired (0 = no kick running)
 	int64_t lastShotQpc = 0;
 	float   kickW = 0.0f;                    // 0..1: the kick's own fade (it stays on while aiming)
+	float   kickSideW = 0.0f;                // 0..1: the side-to-side sway's fade (off while aiming)
+	float   lookW = 0.0f;                    // the look sway's fade (fSwayAimMult while aiming)
 	float   kickSideTarget = 0.0f;           // where the side-to-side sway heads, -1..1 (+ = right)
 	float   kickSideCur = 0.0f, kickSideVel = 0.0f;  // the sway itself, following that smoothly
 	uint32_t kickRng = 0x9E3779B9u;
@@ -2036,9 +2047,17 @@ static void UpdateGunSway()
 		                    *(int*)addr::kVATSMode == 0 && !PlayerRagdollReason();
 		const float kickTarget = !kickOn ? 0.0f : (g_swayChecksOk && PlayerAiming()) ? c.kickAim : 1.0f;
 		g_sway.kickW = Approach(g_sway.kickW, kickTarget, dt, 0.1f);
+		// Aiming down the sights, the side-to-side sway would swing the sights off the target (the
+		// straight back kick doesn't): fShotKickSideAimMult of it, none by default.
+		const float sideTarget = !kickOn ? 0.0f : (g_swayChecksOk && PlayerAiming()) ? c.kickSideAim : 1.0f;
+		g_sway.kickSideW = Approach(g_sway.kickSideW, sideTarget, dt, 0.1f);
 
-		g_sway.oh = g_sway.lagH * g_sway.weight;  // + = gun points right of the view
-		g_sway.op = g_sway.lagP * g_sway.weight;  // + = gun points below the view
+		// The look sway also shows while aiming down the sights, at fSwayAimMult (the rest of the
+		// sway system, steps, dips and glides, stays off there).
+		const float lookTarget = !kickOn ? 0.0f : (g_swayChecksOk && PlayerAiming()) ? c.swayAim : 1.0f;
+		g_sway.lookW = Approach(g_sway.lookW, lookTarget, dt, 0.1f);
+		g_sway.oh = g_sway.lagH * g_sway.lookW;  // + = gun points right of the view
+		g_sway.op = g_sway.lagP * g_sway.lookW;  // + = gun points below the view
 		g_sway.pitch = p;
 		if (g_cfg.debug) {
 			static int64_t lastLog;
@@ -2076,7 +2095,7 @@ static void ApplyGunSwayTo(NiAVObject* node)
 	const float slideSide = slide ? g_sway.oh * kRadToDeg * g_cfg.sway.slideUnits : 0.0f;
 	const float slideDown = slide ? g_sway.op * kRadToDeg * g_cfg.sway.slideUnits : 0.0f;
 	const float oh = (slide ? 0.0f : g_sway.oh) +
-	                 g_sway.kickSideCur * g_sway.kickW * g_cfg.sway.kickSide * kDegToRad,  // rapid fire sway
+	                 g_sway.kickSideCur * g_sway.kickSideW * g_cfg.sway.kickSide * kDegToRad,  // rapid fire sway
 	            op = (slide ? 0.0f : g_sway.op) + dip * 0.6f * kDegToRad  // dipping tilts the gun down a bit
 	                                 - kick * g_cfg.sway.kickRise * kDegToRad;  // a shot tips it up
 	const float back = g_sway.crouch * g_cfg.sway.crouchBack * g_sway.weight +  // toward the view
@@ -2950,9 +2969,11 @@ static float NonAttackWobbleMult()
 	return ok ? g->value : 0.5f;
 }
 
+static bool g_xhKeepVanillaHidden;  // ours is hidden, and the vanilla one must stay hidden too
 static const char* CrosshairHideReason(WeapData** wOut, bool* closed)
 {
 	*closed = false;
+	g_xhKeepVanillaHidden = false;
 	if (!Player() || !PlayerRoot()) return "no player";
 	if (!g_stateChecksOk) return "state checks failed";
 	if (PlayerRagdollReason()) return "dead or knocked down";
@@ -2974,6 +2995,12 @@ static const char* CrosshairHideReason(WeapData** wOut, bool* closed)
 	// in. (CrosshairTarget also compares the view's field of view with the scope's.)
 	if (g_cfg.xh.hideScoped && ((*wOut)->flags1 & 0x4) && g_swayChecksOk && PlayerAiming())
 		return "aiming through the scope";
+	// Aiming down the iron sights in first person: the sights are the crosshair (as in New Vegas
+	// and with iron sights mods, which hide the vanilla one). Third person aiming keeps it.
+	if (g_cfg.xh.hideAiming && !BodyThirdPerson() && g_swayChecksOk && PlayerAiming()) {
+		g_xhKeepVanillaHidden = true;  // the vanilla one stays hidden too
+		return "aiming down the sights";
+	}
 	return nullptr;
 }
 
@@ -3611,7 +3638,7 @@ static void DrawCrosshair(IDirect3DDevice9* dev)
 	const bool show = CrosshairTarget(W, &target, &closed);
 	const int shots = xh.shots;
 	xh.shots = 0;
-	if (show || xh.vanillaHidden) SetVanillaCrosshair(show);
+	if (show || xh.vanillaHidden || g_xhKeepVanillaHidden) SetVanillaCrosshair(show || g_xhKeepVanillaHidden);
 	if (!show) {
 		xh.visible = false;
 		bb->Release();
@@ -3838,7 +3865,7 @@ static void* __cdecl Hook_CreateProjectile(uint32_t a0, uint32_t shooter, uint32
 // ours shows, keep it hidden right there, before the HUD draws it for a frame.
 static void __fastcall Hook_HudCrosshairVisible(void* tile, void*, uint32_t id, float value, bool propagate)
 {
-	if (xh.visible && id == kTileVisible && value != 0.0f) {
+	if ((xh.visible || g_xhKeepVanillaHidden) && id == kTileVisible && value != 0.0f) {
 		value = 0.0f;
 		if (g_cfg.debug) {
 			static int n;
