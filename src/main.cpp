@@ -292,7 +292,7 @@ struct CrosshairConfig {
 	float opacity       = 0.9f;
 	bool  outline       = true;
 	bool  hideScoped    = true;
-	bool  hideAiming    = true;     // first person: hidden while aiming down the sights (the sights are the crosshair)
+	bool  hideAiming    = false;    // first person: hidden while aiming down the sights (for iron sights mods)
 	bool  noGunClosed   = true;     // no gun drawn: ours replaces the vanilla one, closed, no dot
 	bool  reloadClosed  = true;     // reloading (or clearing a jam): closed too
 	float openTime      = 0.25f;    // seconds: drawing/holstering opens/closes it, the dot fades
