@@ -270,6 +270,7 @@ struct CameraConfig {               // times in seconds
 	bool  keepZoomForced = true;    // forced third person (sitting...): keep the player's zoom
 	bool  steadyReload  = true;     // first person: reload/jam animations don't move the camera
 	bool  steadyFire    = true;     // first person: fire animations don't move the camera
+	bool  seatNoBlock   = true;     // seated: the seat itself doesn't push the camera in
 };
 
 struct CrosshairConfig {
@@ -559,6 +560,8 @@ static void LoadConfig()
 	c.keepZoomForced = b("Camera", "bKeepZoomWhenForced", c.keepZoomForced);
 	c.steadyReload  = b("Camera", "bSteadyReloadCamera", c.steadyReload);
 	c.steadyFire    = b("Camera", "bSteadyFireCamera", c.steadyFire);
+	c.seatNoBlock   = b("Camera", "bSeatDoesNotBlockCamera", c.seatNoBlock);
+	Log("config: Camera: bSeatDoesNotBlockCamera=%d", c.seatNoBlock);
 	Log("config: Camera: bSteadyReloadCamera=%d bSteadyFireCamera=%d", c.steadyReload, c.steadyFire);
 	Log("config: Camera: bKeepZoomWhenForced=%d", c.keepZoomForced);
 	Log("config: Camera: fViewSwitchMs=%.0f fZoomSmoothMs=%.0f bVanityMouseLikeAim=%d", c.viewSwitch * 1000.0f,
@@ -777,6 +780,11 @@ static struct State {
 	NiAVObject* head    = nullptr;
 	bool        ragdoll = false;    // dead/knocked down: hands off the skeleton (PlayerRagdollReason)
 	bool        firstPerson = false; // the chosen view is first person: no body turning
+	bool        sitLook = false;    // seated in third person: the head follows the camera
+	float       sitHeadW = 0.0f;    // 0..1: how far the seated idle's own head/neck movement is replaced
+	NiMatrix3   neckRest = {}, headRest = {};  // their local rotations from the last standing frame
+	bool        haveRest = false;
+	float       sitRel = 0.0f, sitPitch = 0.0f;  // the camera's direction relative to the body
 	bool        freeLook = false;   // weapon holstered, standing still: body stays put
 	bool        torsoLag = false;   // weapon holstered, moving: whole body trails behind turns
 	bool        holsteredMoving = false;  // weapon holstered, moving (free look's only blocker)
@@ -1088,8 +1096,9 @@ static void UpdateFreeLook(uint32_t flags, double dt, float dHeading)
 static void UpdateHead(double dt)
 {
 	const FreeLookConfig& lc = g_cfg.look;
-	const bool active = g.freeLook || g.holsteredMoving;
-	const float rel = active ? -BodyYawTotal() : 0.0f;  // camera direction relative to the body
+	const bool active = g.freeLook || g.holsteredMoving || g.sitLook;
+	// camera direction relative to the body (seated: measured from the camera itself)
+	const float rel = g.sitLook ? g.sitRel : active ? -BodyYawTotal() : 0.0f;
 	if (g.headLooking && std::fabs(rel) > lc.headMaxYaw)
 		g.headLooking = false;
 	else if (!g.headLooking && std::fabs(rel) < lc.headMaxYaw - 5.0f * kDegToRad)
@@ -1102,7 +1111,7 @@ static void UpdateHead(double dt)
 	if (active && g.headLooking) {
 		yaw = rel;
 		// rotX is positive when looking down.
-		pitch = -PlayerPitch();
+		pitch = g.sitLook ? g.sitPitch : -PlayerPitch();
 		if (pitch > lc.headMaxUp) pitch = lc.headMaxUp;
 		if (pitch < -lc.headMaxDown) pitch = -lc.headMaxDown;
 	}
@@ -1191,9 +1200,38 @@ static void UpdateAngle()
 
 	// First person (the chosen view): no body turning at all, the body faces the camera as in
 	// vanilla (with Enhanced Camera the body is visible; free look and turn in place let you see
-	// your own neck).
-	if (!BodyThirdPerson()) {
-		if (g_cfg.debug && !g.firstPerson) Log("first person: body turning off");
+	// your own neck). Likewise while sitting, getting up or sleeping: the furniture animation
+	// places the body, and a leftover turn would shift it off the seat.
+	const uint32_t sit = PlayerSitSleepState();
+	if (!BodyThirdPerson() || sit != 0) {
+		if (g_cfg.debug && !g.firstPerson) Log("body turning off (%s)", BodyThirdPerson() ? "sitting/sleeping" : "first person");
+		// Seated (state 4; 3 = sitting down, 5 = getting up) in third person: the head follows where
+		// the camera points, measured from the camera and the body themselves (the heading doesn't
+		// turn while seated), with free look's limits and smoothing; it eases back on getting up.
+		g.sitLook = false;
+		if (BodyThirdPerson() && sit != 0 && g_cfg.look.enabled) {
+			uint8_t* camRoot = *(uint8_t**)addr::kCameraRoot;
+			NiAVObject* cam = camRoot ? *(NiAVObject**)(camRoot + 0xAC) : nullptr;
+			NiAVObject* root = PlayerRoot();
+			if (sit == 4 && cam && root) {
+				const NiMatrix3& C = cam->world.rot;  // column 0 = the camera's view direction
+				const NiMatrix3& B = root->world.rot;  // column 1 = the body's forward
+				const float camYaw = std::atan2(C.m[0][0], C.m[1][0]), bodyYaw = std::atan2(B.m[0][1], B.m[1][1]);
+				g.sitRel = -WrapPi(camYaw - bodyYaw);
+				g.sitPitch = std::asin(std::fmax(-1.0f, std::fmin(1.0f, C.m[2][0])));
+				g.sitLook = true;
+			}
+			g.firstPerson = true;
+			g.diagonal = g.diagonalVel = g.twist = g.angle = 0.0f;
+			g.bodyYaw = g.bodyDiag = g.bodyDiagVel = 0.0f;
+			g.lean = g.turnRate = 0.0f;
+			g.catchingUp = false;
+			g.freeLook = g.torsoLag = g.holsteredMoving = false;
+			g.haveHeading = false;
+			UpdateHead(dt);  // seated: follow the camera; sitting down / getting up: ease back
+			g.sitHeadW = Approach(g.sitHeadW, g.sitLook ? 1.0f : 0.0f, dt, 0.15f);
+			return;
+		}
 		g.firstPerson = true;
 		g.diagonal = g.diagonalVel = g.twist = g.angle = 0.0f;
 		g.bodyYaw = g.bodyDiag = g.bodyDiagVel = 0.0f;
@@ -1206,7 +1244,8 @@ static void UpdateAngle()
 		g.haveHeading = false;
 		return;
 	}
-	if (g_cfg.debug && g.firstPerson) Log("third person: body turning on");
+	g.sitHeadW = 0.0f;
+	if (g_cfg.debug && g.firstPerson) Log("body turning on");
 	g.firstPerson = false;
 
 	uint32_t flags = PlayerMoveFlags();
@@ -1340,8 +1379,37 @@ static void ApplyBody(NiAVObject* body)
 
 // Turns a neck/head bone by `share` of the head look, about its own position: yaw about the
 // world up axis, then pitch about the horizontal axis to the right of the look direction.
+// Seated, the sitting idle turns the neck and head on its own (looking around), which fights the
+// head tracking: there the animated rotation is replaced (blended by g.sitHeadW) by the bone's
+// local rotation from the last standing frame, on its parent's current rotation, first.
+static NiMatrix3 MatMul(const NiMatrix3& a, const NiMatrix3& b);
 static void ApplyHead(NiAVObject* bone, float share)
 {
+	const bool neck = bone == g.neck;
+	if (PlayerSitSleepState() == 0) {  // standing: remember the relaxed local rotation
+		(neck ? g.neckRest : g.headRest) = bone->local.rot;
+		if (!neck) g.haveRest = true;
+	} else if (g.sitHeadW > 1e-3f && g.haveRest && bone->parent) {
+		const NiMatrix3 target = MatMul(bone->parent->world.rot, neck ? g.neckRest : g.headRest);
+		NiMatrix3& R = bone->world.rot;
+		const float w = g.sitHeadW;
+		for (int i = 0; i < 3; ++i)
+			for (int j = 0; j < 3; ++j) R.m[i][j] += (target.m[i][j] - R.m[i][j]) * w;
+		// re-orthonormalise the columns (Gram-Schmidt)
+		NiPoint3 c0 = { R.m[0][0], R.m[1][0], R.m[2][0] }, c1 = { R.m[0][1], R.m[1][1], R.m[2][1] };
+		auto norm = [](NiPoint3& v) {
+			const float l = std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
+			if (l > 1e-6f) { v.x /= l; v.y /= l; v.z /= l; }
+		};
+		norm(c0);
+		const float d = c0.x * c1.x + c0.y * c1.y + c0.z * c1.z;
+		c1 = { c1.x - c0.x * d, c1.y - c0.y * d, c1.z - c0.z * d };
+		norm(c1);
+		const NiPoint3 c2 = { c0.y * c1.z - c0.z * c1.y, c0.z * c1.x - c0.x * c1.z, c0.x * c1.y - c0.y * c1.x };
+		R.m[0][0] = c0.x; R.m[1][0] = c0.y; R.m[2][0] = c0.z;
+		R.m[0][1] = c1.x; R.m[1][1] = c1.y; R.m[2][1] = c1.z;
+		R.m[0][2] = c2.x; R.m[1][2] = c2.y; R.m[2][2] = c2.z;
+	}
 	if (g.headYaw == 0.0f && g.headPitch == 0.0f) return;
 	if (g.headYaw != 0.0f) {
 		const float a = g.headYaw * share;
@@ -1472,6 +1540,19 @@ typedef uint32_t(__thiscall* ActorMove_t)(void*, float, NiPoint3*, uint32_t);
 static uint32_t __fastcall Hook_PlayerMove(void* actor, void* /*edx*/, float f, NiPoint3* move, uint32_t flags)
 {
 	if (move && __builtin_return_address(0) == (void*)addr::kPlayerMoverMoveRet) {
+		// Sitting down, sitting, getting up, sleeping (furniture): the game moves the player into
+		// and out of the seat itself, with no movement keys; that movement is left exactly as it
+		// is (dropping or smoothing it left the player sitting beside the bench).
+		const uint32_t sit = PlayerSitSleepState();
+		if (g_cfg.debug) {
+			static uint32_t lastSit;
+			if (sit != lastSit) Log("move: sit/sleep state %u -> %u", lastSit, sit);
+			lastSit = sit;
+		}
+		if (sit != 0) {
+			mv = MoveSmooth();
+			return ((ActorMove_t)addr::kActorMove)(actor, f, move, flags);
+		}
 		// No movement keys on the ground: PlayerMover's own movement is dropped (turn in place's
 		// turn animation and the end of a movement animation have root motion that carried the
 		// player off diagonally for about a metre after letting go of the keys while turning).
@@ -2607,6 +2688,36 @@ static bool __fastcall Hook_PovKeyRelease(void* pc, void* /*edx*/, bool firstPer
 		return false;
 	}
 	return ((SetFirstPerson_t)0x00775430)(pc, firstPerson);
+}
+
+// Camera collision: the third person camera casts one ray from the player to the camera
+// (0x568BE0, only called from the camera distance code at 0x76C0F4; it ignores the player's own
+// collision group) and stops at the first hit; for each hit, closest first, it looks up the hit's
+// scene object (0x8F1BF0, called at 0x568D6B) and skips hits whose object is culled (flags & 1).
+// Seated, the seat's backrest sits between the player and a camera looking up from behind, and
+// pulled the camera into the player although the camera's own spot was clear. So while sitting,
+// a hit on furniture right next to the player (its reference: 0x4E7B90; base form type 0x27) is
+// reported as culled, and the ray carries on to the next hit: walls and everything else still
+// stop the camera.
+static struct { uint8_t pad[0x30]; uint32_t flags; } g_culledStandIn = { {}, 1 };
+static void* __cdecl Hook_CameraHitObject(void* collidable)
+{
+	void* obj = ((void*(__cdecl*)(void*))0x008F1BF0)(collidable);
+	if (!obj || !g_cfg.cam.seatNoBlock || PlayerSitSleepState() == 0) return obj;
+	uint8_t* pc = (uint8_t*)Player();
+	uint8_t* ref = ((uint8_t*(__cdecl*)(void*))0x004E7B90)(obj);
+	if (!pc || !ref || ref == pc) return obj;
+	const uint8_t* base = *(uint8_t**)(ref + 0x1C);
+	if (!base || base[4] != 0x27) return obj;  // not furniture
+	const NiPoint3& a = *(NiPoint3*)(ref + 0x2C);
+	const NiPoint3& b = *(NiPoint3*)(pc + off::kRefrPos);
+	const float dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
+	if (dx * dx + dy * dy + dz * dz > 200.0f * 200.0f) return obj;  // not the seat
+	if (g_cfg.debug) {
+		static int n;
+		if (n++ < 5) Log("camera: the seat (%08X) doesn't block the camera", *(uint32_t*)(ref + 0x0C));
+	}
+	return &g_culledStandIn;
 }
 
 // FLOW's camera work, just before the camera node's NiAVObject::Update (0x77E538).
@@ -4083,6 +4194,19 @@ __declspec(dllexport) bool FOSEPlugin_Load(const FOSEInterface* fose)
 			// has loaded: see InstallLateCameraHooks.
 			g_camHookPending = true;
 			Log("third person camera update at %08X: hooked on the first frame (after the other plugins)", (unsigned)at);
+			if (g_cfg.cam.seatNoBlock) {
+				const uintptr_t hc = 0x00568D6B;  // call 0x8F1BF0 in the camera's ray cast
+				if (*(uint8_t*)hc == 0xE8 && hc + 5 + *(int32_t*)(hc + 1) == 0x008F1BF0) {
+					DWORD old;
+					VirtualProtect((void*)hc, 5, PAGE_EXECUTE_READWRITE, &old);
+					*(int32_t*)(hc + 1) = (int32_t)((uintptr_t)&Hook_CameraHitObject - (hc + 5));
+					VirtualProtect((void*)hc, 5, old, &old);
+					FlushInstructionCache(GetCurrentProcess(), (void*)hc, 5);
+					Log("seated camera: the seat no longer blocks it (hooked 00568D6B)");
+				} else {
+					Log("WARNING: camera ray cast code does not match; the seat still blocks the camera");
+				}
+			}
 			if (g_cfg.cam.vanityMouse) {
 				// cmp byte ptr [0x1075B28], al; fild dword ptr [esp+0x18]; ...; fld [fVanityModeXMult]
 				const uint8_t v[] = { 0x38, 0x05, 0x28, 0x5B, 0x07, 0x01, 0xDB, 0x44, 0x24, 0x18 };
